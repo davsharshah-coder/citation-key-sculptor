@@ -37,9 +37,11 @@ Examples: `ODonoghueML-2022-36342163`, `ASA-2022-asahqorg-statementtransesophage
 - Right-click → **Attach PDF from Comet / OSU EasyProxy** queues selected
   records for PDF resolution through the shared helper at
   `~/.claude/Bin/zotero-smart-capture/zotero-smart-capture`. The queue stores
-  item IDs, skips records that already have PDFs or lack a DOI, imports resolved
+  item IDs, skips records that already have PDFs or lack a DOI, links resolved
   PDFs into the existing Zotero parent item, and leaves Zotero usable while it
-  works through the selection.
+  works through the selection. Resolved PDFs are placed at the configured
+  linked-file base directory as `<citationKey>.pdf` and linked via Zotero's
+  `attachments:` relative-path model; they are not imported into Zotero storage.
 - Grounds DOI-only PubMed-indexed journal articles to native `PMID` before
   computing the key, avoiding inappropriate DOI fallback for PubMed records.
 - Renames child PDFs deterministically: first PDF to `<citationKey>.pdf`, then
@@ -58,8 +60,9 @@ capture while Zotero is closed, use the same shared helper directly:
 
 That mode reads the existing parent records through the Zotero Web API, resolves
 PDFs through Comet's authenticated OSU EasyProxy session or lawful PMC fallback,
-uploads child PDF attachments through Zotero storage, and reports progress via
-macOS notifications. It never reads or exports institutional credentials; login
+places PDFs in the linked-file base directory as `<citationKey>.pdf`, creates
+`linked_file` child attachments through the Zotero Web API, and reports progress
+via macOS notifications. It never reads or exports institutional credentials; login
 stays inside Comet and the browser's password-manager/session layer.
 
 If the OSU session has expired, the helper returns `auth-required`; authenticate

@@ -456,6 +456,28 @@ class CitationKeySculptor {
     return data;
   }
 
+  async placeLinkedPdf(tempPath, ck) {
+    const baseDir = Zotero.Prefs.get("baseAttachmentPath");
+    if (!baseDir) {
+      throw new Error("Zotero linked-file base directory is not configured (baseAttachmentPath).");
+    }
+    const filename = `${ck}.pdf`;
+    const destPath = OS.Path.join(baseDir, filename);
+    const exists = await OS.File.exists(destPath);
+    if (exists) {
+      const tempMd5 = await Zotero.Utilities.Internal.md5Async(tempPath);
+      const destMd5 = await Zotero.Utilities.Internal.md5Async(destPath);
+      try { await OS.File.remove(tempPath); } catch (e) {}
+      if (tempMd5 === destMd5) {
+        return { path: destPath, filename };
+      }
+      throw new Error(`Linked-file target already exists with different bytes: ${destPath}`);
+    }
+    await OS.File.copy(tempPath, destPath, { noOverwrite: true });
+    try { await OS.File.remove(tempPath); } catch (e) {}
+    return { path: destPath, filename };
+  }
+
   async attachCometPdfToItem(item) {
     await item.loadAllData();
     if (await this.hasPdfAttachment(item)) {
@@ -476,15 +498,16 @@ class CitationKeySculptor {
     }
     let attachment;
     try {
-      attachment = await Zotero.Attachments.importFromFile({
-        file: smart.path,
+      const linked = await this.placeLinkedPdf(smart.path, ck);
+      attachment = await Zotero.Attachments.linkFromFileWithRelativePath({
+        path: linked.filename,
         parentItemID: item.id,
-        title: `${ck}.pdf`,
-        fileBaseName: ck,
+        title: "Full Text PDF",
         contentType: "application/pdf",
       });
-    } finally {
-      try { await OS.File.remove(smart.path); } catch (e) {}
+    } catch (e) {
+      try { await OS.File.remove(smart.path); } catch (_ignore) {}
+      throw e;
     }
     await this.renameAttachments(item, ck);
     return {
@@ -525,7 +548,6 @@ class CitationKeySculptor {
     try {
       while (this.pdfQueue.length) {
         const entry = this.pdfQueue.shift();
-        this.pdfQueueSeen.delete(entry.queueKey);
         try {
           const item = await Zotero.Items.getAsync(entry.id);
           if (!item || !item.isRegularItem || !item.isRegularItem() || item.isFeedItem) {
@@ -541,6 +563,8 @@ class CitationKeySculptor {
         } catch (e) {
           failed++;
           this.log(`PDF queue error on item ${entry.key || entry.id}: ${e}`);
+        } finally {
+          this.pdfQueueSeen.delete(entry.queueKey);
         }
       }
     } finally {
