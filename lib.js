@@ -426,8 +426,8 @@ class CitationKeySculptor {
   }
 
   async runSmartCapture(item, ck) {
-    const helper = OS.Path.join(
-      OS.Constants.Path.homeDir,
+    const helper = PathUtils.join(
+      FileUtils.getDir("Home", []).path,
       ".claude",
       "Bin",
       "zotero-smart-capture",
@@ -462,19 +462,19 @@ class CitationKeySculptor {
       throw new Error("Zotero linked-file base directory is not configured (baseAttachmentPath).");
     }
     const filename = `${ck}.pdf`;
-    const destPath = OS.Path.join(baseDir, filename);
-    const exists = await OS.File.exists(destPath);
+    const destPath = PathUtils.join(baseDir, filename);
+    const exists = await IOUtils.exists(destPath);
     if (exists) {
       const tempMd5 = await Zotero.Utilities.Internal.md5Async(tempPath);
       const destMd5 = await Zotero.Utilities.Internal.md5Async(destPath);
-      try { await OS.File.remove(tempPath); } catch (e) {}
+      try { await IOUtils.remove(tempPath, { ignoreAbsent: true }); } catch (e) {}
       if (tempMd5 === destMd5) {
         return { path: destPath, filename };
       }
       throw new Error(`Linked-file target already exists with different bytes: ${destPath}`);
     }
-    await OS.File.copy(tempPath, destPath, { noOverwrite: true });
-    try { await OS.File.remove(tempPath); } catch (e) {}
+    await IOUtils.copy(tempPath, destPath, { noOverwrite: true });
+    try { await IOUtils.remove(tempPath, { ignoreAbsent: true }); } catch (e) {}
     return { path: destPath, filename };
   }
 
@@ -506,7 +506,7 @@ class CitationKeySculptor {
         contentType: "application/pdf",
       });
     } catch (e) {
-      try { await OS.File.remove(smart.path); } catch (_ignore) {}
+      try { await IOUtils.remove(smart.path, { ignoreAbsent: true }); } catch (_ignore) {}
       throw e;
     }
     await this.renameAttachments(item, ck);

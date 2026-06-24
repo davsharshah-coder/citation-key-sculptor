@@ -19,7 +19,11 @@ async function startup({ resourceURI, rootURI = resourceURI.spec }, _reason) {
   // loadSubScript evaluates lib.js with { Zotero } injected into its scope.
   // lib.js ends with `Zotero.CitationKeySculptor = new CitationKeySculptor();`
   // so the singleton exists the moment this call returns.
-  Services.scriptloader.loadSubScript(`${rootURI}lib.js`, { Zotero });
+  // Zotero 9 (Gecko 140) removed the legacy `OS` (osfile) global. Pass the modern
+  // file APIs into lib.js's scope so its filesystem calls bind: IOUtils/PathUtils are
+  // privileged-sandbox globals; FileUtils is imported here for the home directory.
+  const { FileUtils } = ChromeUtils.importESModule("resource://gre/modules/FileUtils.sys.mjs");
+  Services.scriptloader.loadSubScript(`${rootURI}lib.js`, { Zotero, IOUtils, PathUtils, FileUtils });
   Zotero.CitationKeySculptor.startup({ rootURI });
   const win = Zotero.getMainWindow();
   if (win) {
