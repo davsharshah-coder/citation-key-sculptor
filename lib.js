@@ -79,9 +79,9 @@ function pmidOf(item) {
   const extra = safeGetField(item, "extra");
   const em = extra.match(/^\s*PMID\s*:\s*(\d+)/im);
   if (em) return em[1];
-  const ck = safeGetField(item, "citationKey");
-  const cm = ck.match(/-(\d{6,9})$/);
-  if (cm) return cm[1];
+  // NOTE: deliberately do NOT mine a PMID from the existing citationKey suffix.
+  // During a migration that replaces old keys, trusting the current key as a
+  // PMID authority could freeze a wrong id. Native PMID / Extra PMID only.
   return "";
 }
 
@@ -94,28 +94,23 @@ function authorToken(creators) {
   const isAuthor = (c) =>
     Zotero.CreatorTypes.getName(c.creatorTypeID) === "author";
 
-  // Individual: prefer creatorType "author"; else fall back to the first
-  // individual creator of ANY type (presenter, podcaster, editor, director, …)
-  // so talks/podcasts/broadcasts/edited works still key by their primary person.
-  let indiv = (creators || []).filter(
-    (c) => isAuthor(c) && c.fieldMode !== 1 && c.lastName
-  );
-  if (!indiv.length) {
-    indiv = (creators || []).filter((c) => c.fieldMode !== 1 && c.lastName);
+  // Priority: (1) individual AUTHOR, (2) organisation AUTHOR, (3) first individual
+  // creator of ANY type (presenter/podcaster/editor/director/…), (4) any org
+  // creator. The "author" role — individual OR organisation — always beats a
+  // non-author contributor, so an org-author is never overridden by a contributor.
+  const cs = creators || [];
+  let a = cs.find((c) => isAuthor(c) && c.fieldMode !== 1 && c.lastName);
+  if (a) {
+    return { token: foldAscii(a.lastName) + initialsOf(a.firstName || ""), orgFallback: false };
   }
-  if (indiv.length > 0) {
-    const a = indiv[0];
-    return {
-      token: foldAscii(a.lastName) + initialsOf(a.firstName || ""),
-      orgFallback: false,
-    };
+  let org = cs.find((c) => isAuthor(c) && c.fieldMode === 1 && c.lastName);
+  if (!org) {
+    a = cs.find((c) => c.fieldMode !== 1 && c.lastName); // non-author individual
+    if (a) {
+      return { token: foldAscii(a.lastName) + initialsOf(a.firstName || ""), orgFallback: false };
+    }
+    org = cs.find((c) => c.fieldMode === 1 && c.lastName); // non-author organisation
   }
-
-  // Organisation: prefer "author"; else any single-field (institutional) creator.
-  let org = (creators || []).find(
-    (c) => isAuthor(c) && c.fieldMode === 1 && c.lastName
-  );
-  if (!org) org = (creators || []).find((c) => c.fieldMode === 1 && c.lastName);
   if (org) {
     const name = String(org.lastName);
     const words = name
@@ -359,25 +354,30 @@ class CitationKeySculptor {
     return result;
   }
 
-  // Rename each child PDF attachment to <citationKey>.pdf. Collision-safe
-  // (unique:true appends a suffix rather than overwriting); idempotent (Zotero
-  // skips when the name already matches). Works for stored AND linked files.
-  // Attachment renames fire 'modify' on the ATTACHMENT (not a regular item), so
-  // the notifier's regular-item filter ignores them — no rename loop.
+  // Rename child PDFs deterministically: PDFs are sorted by attachment id and the
+  // first becomes <citationKey>.pdf, then <citationKey>-2.pdf, <citationKey>-3.pdf …
+  // Stable across runs (idempotent for multi-PDF parents — no suffix churn) and,
+  // since the citationKey is unique library-wide, collision-free without unique:true.
+  // Works for stored AND linked files. Attachment renames fire 'modify' on the
+  // ATTACHMENT (not a regular item), so the notifier's regular-item filter ignores
+  // them — no rename loop.
   async renameAttachments(item, ck) {
     if (!ck) return 0;
     const attIds = item.getAttachments() || [];
     if (!attIds.length) return 0;
     const atts = await Zotero.Items.getAsync(attIds);
+    const pdfs = atts
+      .filter((a) => a.isFileAttachment && a.isFileAttachment() && a.attachmentContentType === "application/pdf")
+      .sort((a, b) => a.id - b.id);
     let renamed = 0;
-    for (const att of atts) {
+    for (let i = 0; i < pdfs.length; i++) {
+      const att = pdfs[i];
+      const target = i === 0 ? `${ck}.pdf` : `${ck}-${i + 1}.pdf`;
+      if ((att.attachmentFilename || "") === target) continue; // already correct
       try {
-        if (!att.isFileAttachment || !att.isFileAttachment()) continue;
-        if (att.attachmentContentType !== "application/pdf") continue;
-        const target = `${ck}.pdf`;
-        if ((att.attachmentFilename || "") === target) continue; // already correct
-        const r = await att.renameAttachmentFile(target, { unique: true, updateTitle: true });
+        const r = await att.renameAttachmentFile(target, { overwrite: false, unique: false, updateTitle: true });
         if (r && r !== -1) renamed++;
+        else this.log(`PDF rename skipped (att ${att.id}, target ${target}, result ${r})`);
       } catch (e) {
         this.log(`PDF rename failed (att ${att.id}): ${e}`);
       }
