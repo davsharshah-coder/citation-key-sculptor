@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Citation Key Sculptor",
+  "version": "1.0.2",
+  "description": "Writes CitationSculptor-style citation keys (FirstAuthorLastName+Initials-Year-PMID) to the native citationKey field, computed from native Zotero fields. Independent of Better BibTeX. No auto-update.",
+  "applications": {
+    "zotero": {
+      "id": "citation-key-sculptor@tusharshah.local",
+      "update_url": "https://raw.githubusercontent.com/davsharshah-coder/citation-key-sculptor/main/updates.json",
+      "strict_min_version": "8.0.1",
+      "strict_max_version": "10.*"
+    }
+  }
+}
