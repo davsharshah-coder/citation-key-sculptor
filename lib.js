@@ -120,6 +120,15 @@ function authorToken(creators) {
   return { token: "", orgFallback: false };
 }
 
+// briefTitleOf: deterministic 2-significant-word title slug for web-key
+// disambiguation (so distinct pages on the same site get distinct keys).
+// MUST be implemented identically in CitationSculptor + zotero-curate.
+function briefTitleOf(title) {
+  const STOP = new Set(["of", "the", "and", "for", "on", "in", "a", "an", "to", "with", "by", "from", "at", "as", "is", "are", "or", "but", "how", "what", "why"]);
+  const words = (title || "").split(/[^A-Za-z0-9]+/).filter(w => w.length > 2 && !STOP.has(w.toLowerCase()));
+  return words.slice(0, 2).map(w => foldAscii(w).toLowerCase()).join("");
+}
+
 // authorlessToken: webpage/blog fallback — derive a token from the URL host
 // (strip leading www. and the TLD, foldAscii, uppercase first letter). Kept
 // deterministic (host-only, no scraped site name) so it matches CitationSculptor.
@@ -163,6 +172,13 @@ function citationKeyFor(item) {
         }
       }
     }
+  }
+
+  // Web items get a brief-title disambiguator appended so distinct pages on the
+  // same site (same Token-Year-domain) get distinct keys.
+  if (isWeb && idPart) {
+    const bt = briefTitleOf(safeGetField(item, "title"));
+    if (bt) idPart = idPart + "-" + bt;
   }
 
   // Year-less web items: emit "ND" (matches CitationSculptor). Non-web items

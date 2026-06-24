@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Citation Key Sculptor",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Writes CitationSculptor-style citation keys (FirstAuthorLastName+Initials-Year-PMID) to the native citationKey field, computed from native Zotero fields. Independent of Better BibTeX. No auto-update.",
   "applications": {
     "zotero": {
