@@ -18,6 +18,7 @@
 
 const PLUGIN_ID = "citation-key-sculptor@tusharshah.local";
 const PREF_AUTO = "extensions.citation-key-sculptor.auto"; // bool gate for notifier
+const PREF_RENAME = "extensions.citation-key-sculptor.renamePdfs"; // rename child PDFs to <citationKey>.pdf
 const OBSERVER_ID = "citation-key-sculptor";
 
 // ----------------------------------------------------------------------------
@@ -233,6 +234,9 @@ class CitationKeySculptor {
     if (Zotero.Prefs.get(PREF_AUTO) === undefined) {
       Zotero.Prefs.set(PREF_AUTO, true);
     }
+    if (Zotero.Prefs.get(PREF_RENAME) === undefined) {
+      Zotero.Prefs.set(PREF_RENAME, true); // rename PDFs to match the key by default
+    }
     this.checkBBTConflict();
 
     this.notifier = Zotero.Notifier.registerObserver(
@@ -305,7 +309,8 @@ class CitationKeySculptor {
 
   // ----- core operations ---------------------------------------------------
 
-  // Compute + write the key for one item, ONLY if it differs (loop-safe).
+  // Compute + write the key for one item, ONLY if it differs (loop-safe), then
+  // rename its child PDFs to <citationKey>.pdf (gated by PREF_RENAME).
   // Returns "written" | "unchanged" | "skipped" | "no-key".
   async applyKey(item) {
     if (!item || !item.isRegularItem() || item.isFeedItem) return "skipped";
@@ -319,11 +324,45 @@ class CitationKeySculptor {
     if (!computed) return "no-key";
 
     const current = item.getField("citationKey") || "";
-    if (computed === current) return "unchanged"; // convergence guard
+    let result = "unchanged";
+    if (computed !== current) {
+      item.setField("citationKey", computed);
+      await item.saveTx(); // convergence: self-fired modify recomputes same key -> no change
+      result = "written";
+    }
 
-    item.setField("citationKey", computed);
-    await item.saveTx();
-    return "written";
+    // Rename child PDFs to <citationKey>.pdf. Runs on written AND unchanged so a
+    // stale filename is corrected even when the key didn't change.
+    if (Zotero.Prefs.get(PREF_RENAME)) {
+      try { await this.renameAttachments(item, computed); } catch (e) { this.log(`rename error (item ${item.id}): ${e}`); }
+    }
+    return result;
+  }
+
+  // Rename each child PDF attachment to <citationKey>.pdf. Collision-safe
+  // (unique:true appends a suffix rather than overwriting); idempotent (Zotero
+  // skips when the name already matches). Works for stored AND linked files.
+  // Attachment renames fire 'modify' on the ATTACHMENT (not a regular item), so
+  // the notifier's regular-item filter ignores them — no rename loop.
+  async renameAttachments(item, ck) {
+    if (!ck) return 0;
+    const attIds = item.getAttachments() || [];
+    if (!attIds.length) return 0;
+    const atts = await Zotero.Items.getAsync(attIds);
+    let renamed = 0;
+    for (const att of atts) {
+      try {
+        if (!att.isFileAttachment || !att.isFileAttachment()) continue;
+        if (att.attachmentContentType !== "application/pdf") continue;
+        const target = `${ck}.pdf`;
+        if ((att.attachmentFilename || "") === target) continue; // already correct
+        const r = await att.renameAttachmentFile(target, { unique: true, updateTitle: true });
+        if (r && r !== -1) renamed++;
+      } catch (e) {
+        this.log(`PDF rename failed (att ${att.id}): ${e}`);
+      }
+    }
+    return renamed;
   }
 
   // Right-click handler: run on the current selection.
