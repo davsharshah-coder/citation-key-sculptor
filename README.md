@@ -19,6 +19,9 @@ foldAscii(FirstAuthorLastName) + ALL forename initials + "-" + Year + "-" + Iden
 - **foldAscii** strips diacritics, apostrophes, and hyphens (`O'Donoghue ML` → `ODonoghueML`,
   `Simental-Mendia LE` → `SimentalMendiaLE`, `Müller H` → `MullerH`).
 - **Identifier chain:** PMID → `DOI`+foldAscii(DOI) → URL host-domain → brief-title.
+- DOI-only PubMed-indexed journal articles are first grounded through PubMed
+  DOI lookup; if exactly one PMID is found, the plugin writes native `PMID` and
+  uses that PMID key instead of falling back to DOI.
 - **Web items** append a 2-word brief-title disambiguator (`Token-Year-domain-brieftitle`).
 - **No-identifier items** (talks, podcasts, undated reports) fall back to
   `Token-Year(or ND)-brieftitle`.
@@ -31,6 +34,8 @@ Examples: `ODonoghueML-2022-36342163`, `ASA-2022-asahqorg-statementtransesophage
 
 - Auto-applies on item add/modify (toggle: pref `extensions.citation-key-sculptor.auto`).
 - Right-click → **Generate citation key** for a selection.
+- Grounds DOI-only PubMed-indexed journal articles to native `PMID` before
+  computing the key, avoiding inappropriate DOI fallback for PubMed records.
 - Renames child PDFs deterministically: first PDF to `<citationKey>.pdf`, then
   `<citationKey>-2.pdf`, `<citationKey>-3.pdf`, etc. for multi-PDF parents
   (toggle: pref `extensions.citation-key-sculptor.renamePdfs`).

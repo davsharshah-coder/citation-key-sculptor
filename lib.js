@@ -20,6 +20,7 @@ const PLUGIN_ID = "citation-key-sculptor@tusharshah.local";
 const PREF_AUTO = "extensions.citation-key-sculptor.auto"; // bool gate for notifier
 const PREF_RENAME = "extensions.citation-key-sculptor.renamePdfs"; // rename child PDFs to <citationKey>.pdf / <citationKey>-N.pdf
 const OBSERVER_ID = "citation-key-sculptor";
+const PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi";
 
 // ----------------------------------------------------------------------------
 // citationKeyFor algorithm — ported faithfully from zotero-curate/index.ts.
@@ -213,6 +214,7 @@ class CitationKeySculptor {
     this.notifier = undefined;
     this.menuRegistered = false;
     this.id = PLUGIN_ID;
+    this.doiPmidCache = new Map();
   }
 
   log(msg) {
@@ -325,6 +327,58 @@ class CitationKeySculptor {
 
   // ----- core operations ---------------------------------------------------
 
+  async pmidForDoi(doi) {
+    const clean = (doi || "").trim();
+    if (!clean) return "";
+    const key = clean.toLowerCase();
+    if (this.doiPmidCache.has(key)) return this.doiPmidCache.get(key);
+
+    const url =
+      `${PUBMED_ESEARCH}?db=pubmed&retmode=json&retmax=2&term=` +
+      encodeURIComponent(`${clean}[DOI]`);
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        this.log(`PubMed DOI lookup failed (${resp.status}) for ${clean}`);
+        this.doiPmidCache.set(key, "");
+        return "";
+      }
+      const data = await resp.json();
+      const ids = (data && data.esearchresult && data.esearchresult.idlist) || [];
+      if (ids.length === 1 && /^\d+$/.test(ids[0])) {
+        this.doiPmidCache.set(key, ids[0]);
+        return ids[0];
+      }
+      if (ids.length > 1) {
+        this.log(`PubMed DOI lookup ambiguous for ${clean}: ${ids.join(", ")}`);
+      }
+    } catch (e) {
+      this.log(`PubMed DOI lookup error for ${clean}: ${e}`);
+    }
+    this.doiPmidCache.set(key, "");
+    return "";
+  }
+
+  async groundPmidFromDoi(item) {
+    if (!item || !item.isRegularItem || !item.isRegularItem()) return false;
+    if (pmidOf(item)) return false;
+
+    const doi = safeGetField(item, "DOI").trim();
+    if (!doi) return false;
+
+    const fieldID = Zotero.ItemFields.getID("PMID");
+    if (!fieldID || !Zotero.ItemFields.isValidForType(fieldID, item.itemTypeID)) {
+      return false;
+    }
+
+    const pmid = await this.pmidForDoi(doi);
+    if (!pmid) return false;
+
+    item.setField("PMID", pmid);
+    this.log(`Grounded DOI ${doi} to PMID ${pmid} for item ${item.key}`);
+    return true;
+  }
+
   // Compute + write the key for one item, ONLY if it differs (loop-safe), then
   // rename its child PDFs deterministically (gated by PREF_RENAME).
   // Returns "written" | "unchanged" | "skipped" | "no-key".
@@ -336,6 +390,7 @@ class CitationKeySculptor {
       return "skipped";
     }
 
+    const grounded = await this.groundPmidFromDoi(item);
     const computed = citationKeyFor(item);
     if (!computed) return "no-key";
 
@@ -343,6 +398,8 @@ class CitationKeySculptor {
     let result = "unchanged";
     if (computed !== current) {
       item.setField("citationKey", computed);
+    }
+    if (grounded || computed !== current) {
       await item.saveTx(); // convergence: self-fired modify recomputes same key -> no change
       result = "written";
     }
