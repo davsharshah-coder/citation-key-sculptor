@@ -18,7 +18,7 @@
 
 const PLUGIN_ID = "citation-key-sculptor@tusharshah.local";
 const PREF_AUTO = "extensions.citation-key-sculptor.auto"; // bool gate for notifier
-const PREF_RENAME = "extensions.citation-key-sculptor.renamePdfs"; // rename child PDFs to <citationKey>.pdf
+const PREF_RENAME = "extensions.citation-key-sculptor.renamePdfs"; // rename child PDFs to <citationKey>.pdf / <citationKey>-N.pdf
 const OBSERVER_ID = "citation-key-sculptor";
 
 // ----------------------------------------------------------------------------
@@ -72,7 +72,8 @@ function safeGetField(item, field) {
 }
 
 // pmidOf: robust PMID sourcing to match zotero-curate's precedence —
-// native PMID field -> Extra "PMID: n" line -> existing citationKey suffix.
+// native PMID field -> Extra "PMID: n" line. Existing citationKey suffixes are
+// intentionally ignored during migration.
 function pmidOf(item) {
   const native = safeGetField(item, "PMID").trim();
   if (native) return native;
@@ -325,7 +326,7 @@ class CitationKeySculptor {
   // ----- core operations ---------------------------------------------------
 
   // Compute + write the key for one item, ONLY if it differs (loop-safe), then
-  // rename its child PDFs to <citationKey>.pdf (gated by PREF_RENAME).
+  // rename its child PDFs deterministically (gated by PREF_RENAME).
   // Returns "written" | "unchanged" | "skipped" | "no-key".
   async applyKey(item) {
     if (!item || !item.isRegularItem() || item.isFeedItem) return "skipped";
@@ -346,8 +347,8 @@ class CitationKeySculptor {
       result = "written";
     }
 
-    // Rename child PDFs to <citationKey>.pdf. Runs on written AND unchanged so a
-    // stale filename is corrected even when the key didn't change.
+    // Rename child PDFs to deterministic key-derived names. Runs on written AND
+    // unchanged so a stale filename is corrected even when the key didn't change.
     if (Zotero.Prefs.get(PREF_RENAME)) {
       try { await this.renameAttachments(item, computed); } catch (e) { this.log(`rename error (item ${item.id}): ${e}`); }
     }
@@ -356,8 +357,9 @@ class CitationKeySculptor {
 
   // Rename child PDFs deterministically: PDFs are sorted by attachment id and the
   // first becomes <citationKey>.pdf, then <citationKey>-2.pdf, <citationKey>-3.pdf …
-  // Stable across runs (idempotent for multi-PDF parents — no suffix churn) and,
-  // since the citationKey is unique library-wide, collision-free without unique:true.
+  // Stable across runs (idempotent for multi-PDF parents — no suffix churn). Since
+  // the citationKey is unique library-wide, same-plugin target collisions should not
+  // occur; unexpected filesystem collisions are logged rather than auto-suffixed.
   // Works for stored AND linked files. Attachment renames fire 'modify' on the
   // ATTACHMENT (not a regular item), so the notifier's regular-item filter ignores
   // them — no rename loop.

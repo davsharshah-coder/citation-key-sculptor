@@ -1,9 +1,10 @@
 # Citation Key Sculptor
 
 A small, self-contained Zotero 7/8/9 plugin that writes a deterministic citation
-key to each item's **native `citationKey` field** and renames each child PDF to
-`<citationKey>.pdf` — so the PDF filename, the Zotero citation key, and an
-external [CitationSculptor](https://github.com/) reference tag all match.
+key to each item's **native `citationKey` field** and renames child PDFs to
+deterministic key-derived names (`<citationKey>.pdf`, `<citationKey>-2.pdf`, ...)
+— so the PDF filename, the Zotero citation key, and an external
+[CitationSculptor](https://github.com/) reference tag all match.
 
 Built to replace Better BibTeX for this workflow (BBT could not read Zotero's
 native PMID field and degraded keys on edit). Independent of BBT and named
@@ -30,7 +31,8 @@ Examples: `ODonoghueML-2022-36342163`, `ASA-2022-asahqorg-statementtransesophage
 
 - Auto-applies on item add/modify (toggle: pref `extensions.citation-key-sculptor.auto`).
 - Right-click → **Generate citation key** for a selection.
-- Renames child PDFs to `<citationKey>.pdf`, collision-safe and idempotent
+- Renames child PDFs deterministically: first PDF to `<citationKey>.pdf`, then
+  `<citationKey>-2.pdf`, `<citationKey>-3.pdf`, etc. for multi-PDF parents
   (toggle: pref `extensions.citation-key-sculptor.renamePdfs`).
 - Only writes when the computed key differs from the current value (loop-safe).
 
