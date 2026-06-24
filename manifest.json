@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Citation Key Sculptor",
-  "version": "1.1.0",
-  "description": "Writes CitationSculptor-style citation keys to the native citationKey field AND renames each PDF to <citationKey>.pdf, from native Zotero fields. Independent of Better BibTeX. No auto-update.",
+  "version": "1.2.0",
+  "description": "Writes CitationSculptor-style citation keys to the native citationKey field AND renames each PDF to <citationKey>.pdf, from native Zotero fields. Brief-title fallback keys items lacking PMID/DOI/URL. Independent of Better BibTeX. No auto-update.",
   "applications": {
     "zotero": {
       "id": "citation-key-sculptor@tusharshah.local",

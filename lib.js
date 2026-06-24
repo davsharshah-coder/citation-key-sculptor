@@ -26,8 +26,9 @@ const OBSERVER_ID = "citation-key-sculptor";
 // Key format: foldAscii(FirstAuthorLastName) + initials(ALL given names)
 //             + '-' + Year + '-' + Identifier
 //   e.g. AbbasiJ-2026-41893839, ODonoghueML-2022-36342163
-// Identifier fallback chain: PMID -> 'DOI'+foldAscii(DOI) -> URL hostname.
-// Returns '' when author, year, or identifier is missing.
+// Identifier fallback chain: PMID -> 'DOI'+foldAscii(DOI) -> URL hostname[-briefTitle]
+//   -> briefTitle (for items with no PMID/DOI/URL, e.g. talks/podcasts: Token-Year|ND-briefTitle).
+// Returns '' only when no author/org token can be derived.
 // ----------------------------------------------------------------------------
 
 // foldAscii: diacritic map + NFD strip + non-alnum removal (CLI lines 62-70).
@@ -182,10 +183,21 @@ function citationKeyFor(item) {
     if (bt) idPart = idPart + "-" + bt;
   }
 
-  // Year-less web items: emit "ND" (matches CitationSculptor). Non-web items
-  // still require a real year (else no key).
-  const effYear = year || (isWeb && idPart ? "ND" : "");
-  if (token && effYear && idPart) return token + "-" + effYear + "-" + idPart;
+  // Items WITH an identifier (PMID/DOI hard id, or web domain): Token-Year-id.
+  // Year-less web items emit "ND"; non-web items with a hard id still need a year.
+  if (token && idPart) {
+    const effYear = year || (isWeb ? "ND" : "");
+    if (effYear) return token + "-" + effYear + "-" + idPart;
+    return "";
+  }
+
+  // No identifier at all (presentations, podcasts, undated reports, etc.):
+  // fall back to a brief-title identifier so the item still gets a deterministic,
+  // convention-matching key — Token-Year(or ND)-briefTitle.
+  if (token) {
+    const bt = briefTitleOf(safeGetField(item, "title"));
+    if (bt) return token + "-" + (year || "ND") + "-" + bt;
+  }
   return "";
 }
 
