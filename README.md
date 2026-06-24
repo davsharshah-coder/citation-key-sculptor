@@ -34,12 +34,36 @@ Examples: `ODonoghueML-2022-36342163`, `ASA-2022-asahqorg-statementtransesophage
 
 - Auto-applies on item add/modify (toggle: pref `extensions.citation-key-sculptor.auto`).
 - Right-click → **Generate citation key** for a selection.
+- Right-click → **Attach PDF from Comet / OSU EasyProxy** queues selected
+  records for PDF resolution through the shared helper at
+  `~/.claude/Bin/zotero-smart-capture/zotero-smart-capture`. The queue stores
+  item IDs, skips records that already have PDFs or lack a DOI, imports resolved
+  PDFs into the existing Zotero parent item, and leaves Zotero usable while it
+  works through the selection.
 - Grounds DOI-only PubMed-indexed journal articles to native `PMID` before
   computing the key, avoiding inappropriate DOI fallback for PubMed records.
 - Renames child PDFs deterministically: first PDF to `<citationKey>.pdf`, then
   `<citationKey>-2.pdf`, `<citationKey>-3.pdf`, etc. for multi-PDF parents
   (toggle: pref `extensions.citation-key-sculptor.renamePdfs`).
 - Only writes when the computed key differs from the current value (loop-safe).
+
+## Background PDF capture
+
+The Zotero plugin only runs while Zotero is open. For unattended/background PDF
+capture while Zotero is closed, use the same shared helper directly:
+
+```bash
+~/.claude/Bin/zotero-smart-capture/zotero-smart-capture attach-pdf ITEMKEY [ITEMKEY ...]
+```
+
+That mode reads the existing parent records through the Zotero Web API, resolves
+PDFs through Comet's authenticated OSU EasyProxy session or lawful PMC fallback,
+uploads child PDF attachments through Zotero storage, and reports progress via
+macOS notifications. It never reads or exports institutional credentials; login
+stays inside Comet and the browser's password-manager/session layer.
+
+If the OSU session has expired, the helper returns `auth-required`; authenticate
+in Comet, then rerun the command.
 
 ## Install
 

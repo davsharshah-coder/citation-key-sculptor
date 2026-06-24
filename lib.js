@@ -72,6 +72,23 @@ function safeGetField(item, field) {
   }
 }
 
+function normalizeDoi(doi) {
+  return (doi || "")
+    .trim()
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
+    .replace(/^doi:\s*/i, "")
+    .toLowerCase();
+}
+
+function pmcidOf(item) {
+  const native = safeGetField(item, "PMCID").trim();
+  if (native) return native.toUpperCase().startsWith("PMC") ? native.toUpperCase() : `PMC${native}`;
+  const extra = safeGetField(item, "extra");
+  const em = extra.match(/^\s*PMCID\s*:\s*(PMC)?(\d+)/im);
+  if (em) return `PMC${em[2]}`;
+  return "";
+}
+
 // pmidOf: robust PMID sourcing to match zotero-curate's precedence —
 // native PMID field -> Extra "PMID: n" line. Existing citationKey suffixes are
 // intentionally ignored during migration.
@@ -215,6 +232,9 @@ class CitationKeySculptor {
     this.menuRegistered = false;
     this.id = PLUGIN_ID;
     this.doiPmidCache = new Map();
+    this.pdfQueue = [];
+    this.pdfQueueRunning = false;
+    this.pdfQueueSeen = new Set();
   }
 
   log(msg) {
@@ -314,6 +334,21 @@ class CitationKeySculptor {
               Zotero.CitationKeySculptor.generateForSelection();
             },
           },
+          {
+            menuType: "menuitem",
+            onShowing: (_event, context) => {
+              const pane = Zotero.getActiveZoteroPane();
+              const sel = pane ? pane.getSelectedItems() : [];
+              const hasRegular = sel.some(
+                (item) => item.isRegularItem() && !item.isFeedItem
+              );
+              context.setVisible(!!hasRegular);
+              context.menuElem.setAttribute("label", "Attach PDF from Comet / OSU EasyProxy");
+            },
+            onCommand: (_event, _context) => {
+              Zotero.CitationKeySculptor.attachPdfFromCometForSelection();
+            },
+          },
         ],
       });
       this.menuRegistered = true;
@@ -377,6 +412,147 @@ class CitationKeySculptor {
     item.setField("PMID", pmid);
     this.log(`Grounded DOI ${doi} to PMID ${pmid} for item ${item.key}`);
     return true;
+  }
+
+  async hasPdfAttachment(item) {
+    const attIds = item.getAttachments() || [];
+    if (!attIds.length) return false;
+    const atts = await Zotero.Items.getAsync(attIds);
+    return atts.some((a) =>
+      a.isFileAttachment &&
+      a.isFileAttachment() &&
+      a.attachmentContentType === "application/pdf"
+    );
+  }
+
+  async runSmartCapture(item, ck) {
+    const helper = OS.Path.join(
+      OS.Constants.Path.homeDir,
+      ".claude",
+      "Bin",
+      "zotero-smart-capture",
+      "zotero-smart-capture"
+    );
+    const args = [
+      "resolve-pdf",
+      "--doi", safeGetField(item, "DOI").trim(),
+      "--pmid", pmidOf(item),
+      "--pmcid", pmcidOf(item),
+      "--citation-key", ck,
+      "--title", safeGetField(item, "title"),
+      "--no-notify",
+    ];
+    let stdout = "";
+    let data = {};
+    try {
+      stdout = await Zotero.Utilities.Internal.subprocess(helper, args);
+      data = JSON.parse((stdout || "{}").trim());
+    } catch (e) {
+      data = { ok: false, status: "error", error: (stdout || String(e)).slice(0, 500) };
+    }
+    if (data.status === "error") {
+      this.log(`smart-capture failed for ${item.key}: ${JSON.stringify(data)}`);
+    }
+    return data;
+  }
+
+  async attachCometPdfToItem(item) {
+    await item.loadAllData();
+    if (await this.hasPdfAttachment(item)) {
+      return { status: "skipped-has-pdf" };
+    }
+    if (!normalizeDoi(safeGetField(item, "DOI"))) {
+      return { status: "skipped-not-eligible" };
+    }
+
+    const keyStatus = await this.applyKey(item);
+    const ck = safeGetField(item, "citationKey") || citationKeyFor(item);
+    if (!ck) throw new Error("Could not derive citation key before attaching PDF.");
+
+    const smart = await this.runSmartCapture(item, ck);
+    if (!smart || !smart.ok || !smart.path) {
+      this.log(`No PDF found for item ${item.key}: ${JSON.stringify(smart)}`);
+      return { status: "no-pdf-found" };
+    }
+    let attachment;
+    try {
+      attachment = await Zotero.Attachments.importFromFile({
+        file: smart.path,
+        parentItemID: item.id,
+        title: `${ck}.pdf`,
+        fileBaseName: ck,
+        contentType: "application/pdf",
+      });
+    } finally {
+      try { await OS.File.remove(smart.path); } catch (e) {}
+    }
+    await this.renameAttachments(item, ck);
+    return {
+      status: "attached",
+      url: smart.url || "",
+      keyStatus,
+      attachmentKey: attachment ? attachment.key : "",
+      size: smart.size || 0,
+    };
+  }
+
+  // Test/support entry point for debug-bridge and future automation.
+  async attachPdfFromCometForItemKey(itemKey) {
+    const item = await Zotero.Items.getByLibraryAndKeyAsync(Zotero.Libraries.userLibraryID, itemKey);
+    if (!item) throw new Error(`Item not found: ${itemKey}`);
+    return await this.attachCometPdfToItem(item);
+  }
+
+  enqueuePdfItems(items) {
+    let queued = 0;
+    for (const item of items) {
+      const queueKey = `${item.libraryID}:${item.id}`;
+      if (this.pdfQueueSeen.has(queueKey)) continue;
+      this.pdfQueueSeen.add(queueKey);
+      this.pdfQueue.push({ id: item.id, libraryID: item.libraryID, key: item.key, queueKey });
+      queued++;
+    }
+    if (!this.pdfQueueRunning) {
+      this.processPdfQueue(); // Intentionally fire-and-forget so Zotero remains usable.
+    }
+    return queued;
+  }
+
+  async processPdfQueue() {
+    if (this.pdfQueueRunning) return;
+    this.pdfQueueRunning = true;
+    let attached = 0, skipped = 0, notEligible = 0, notFound = 0, failed = 0;
+    try {
+      while (this.pdfQueue.length) {
+        const entry = this.pdfQueue.shift();
+        this.pdfQueueSeen.delete(entry.queueKey);
+        try {
+          const item = await Zotero.Items.getAsync(entry.id);
+          if (!item || !item.isRegularItem || !item.isRegularItem() || item.isFeedItem) {
+            notEligible++;
+            continue;
+          }
+          const result = await this.attachCometPdfToItem(item);
+          if (result.status === "attached") attached++;
+          else if (result.status === "skipped-has-pdf") skipped++;
+          else if (result.status === "skipped-not-eligible") notEligible++;
+          else if (result.status === "no-pdf-found") notFound++;
+          else failed++;
+        } catch (e) {
+          failed++;
+          this.log(`PDF queue error on item ${entry.key || entry.id}: ${e}`);
+        }
+      }
+    } finally {
+      this.pdfQueueRunning = false;
+      this.notify(
+        `Comet / OSU PDF attach finished — attached: ${attached}, already had PDF: ${skipped}, ` +
+        `not eligible: ${notEligible}, not found: ${notFound}, failed: ${failed}.`
+      );
+      if (this.pdfQueue.length) {
+        this.processPdfQueue();
+      }
+    }
   }
 
   // Compute + write the key for one item, ONLY if it differs (loop-safe), then
@@ -481,6 +657,25 @@ class CitationKeySculptor {
     this.notify(
       `Citation keys — written: ${written}, unchanged: ${unchanged}, skipped (no key): ${noKey}.` +
       (soft ? ` ${soft} used a soft brief-title fallback (no PMID/DOI/URL) — consider grounding.` : "")
+    );
+  }
+
+  async attachPdfFromCometForSelection() {
+    const pane = Zotero.getActiveZoteroPane();
+    if (!pane) return;
+    const items = pane
+      .getSelectedItems()
+      .filter((item) => item.isRegularItem() && !item.isFeedItem);
+    if (!items.length) {
+      this.notify("No regular items selected.");
+      return;
+    }
+
+    const queued = this.enqueuePdfItems(items);
+    this.notify(
+      queued
+        ? `Queued ${queued} item${queued === 1 ? "" : "s"} for Comet / OSU PDF attach. You can keep using Zotero.`
+        : "Selected items are already queued for Comet / OSU PDF attach."
     );
   }
 }
