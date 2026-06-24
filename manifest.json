@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Citation Key Sculptor",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Writes CitationSculptor-style citation keys to the native citationKey field and renames child PDFs deterministically (<citationKey>.pdf, <citationKey>-2.pdf, ...). Brief-title fallback for items lacking PMID/DOI/URL; keys by primary creator of any type. Independent of Better BibTeX.",
   "applications": {
     "zotero": {

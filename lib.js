@@ -398,7 +398,7 @@ class CitationKeySculptor {
       this.notify("No regular items selected.");
       return;
     }
-    let written = 0, unchanged = 0, noKey = 0;
+    let written = 0, unchanged = 0, noKey = 0, soft = 0;
     for (const item of items) {
       try {
         await item.loadAllData();
@@ -406,12 +406,24 @@ class CitationKeySculptor {
         if (r === "written") written++;
         else if (r === "unchanged") unchanged++;
         else if (r === "no-key") noKey++;
+        // Soft (brief-title) fallback: a key was produced from the title ALONE,
+        // with NO PMID/DOI/URL. Surface it (parity with CitationSculptor's
+        // manual-review flag) so a "merely missing" identifier on a scholarly
+        // item isn't mistaken for "fully grounded" — these are grounding targets.
+        if ((r === "written" || r === "unchanged") &&
+            (item.getField("citationKey") || "") &&
+            !pmidOf(item) &&
+            !safeGetField(item, "DOI").trim() &&
+            !safeGetField(item, "url").trim()) {
+          soft++;
+        }
       } catch (e) {
         this.log(`generateForSelection error on item ${item.id}: ${e}`);
       }
     }
     this.notify(
-      `Citation keys — written: ${written}, unchanged: ${unchanged}, skipped (no key): ${noKey}.`
+      `Citation keys — written: ${written}, unchanged: ${unchanged}, skipped (no key): ${noKey}.` +
+      (soft ? ` ${soft} used a soft brief-title fallback (no PMID/DOI/URL) — consider grounding.` : "")
     );
   }
 }
