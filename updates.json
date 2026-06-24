@@ -4,7 +4,7 @@
       "updates": [
         {
           "version": "1.3.5",
-          "update_link": "https://github.com/davsharshah-coder/citation-key-sculptor/releases/download/v1.3.5/citation-key-sculptor.xpi",
+          "update_link": "https://github.com/davsharshah-coder/citation-key-sculptor/releases/download/v1.3.5/citation-key-sculptor-v1.3.5.xpi",
           "update_hash": "sha256:9186dd24da002c363ae3cdeaf89cdb9cb70f36d32e21515c16370cd6c4dca935",
           "applications": {
             "zotero": {
