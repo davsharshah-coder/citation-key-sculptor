@@ -94,9 +94,15 @@ function authorToken(creators) {
   const isAuthor = (c) =>
     Zotero.CreatorTypes.getName(c.creatorTypeID) === "author";
 
-  const indiv = (creators || []).filter(
+  // Individual: prefer creatorType "author"; else fall back to the first
+  // individual creator of ANY type (presenter, podcaster, editor, director, …)
+  // so talks/podcasts/broadcasts/edited works still key by their primary person.
+  let indiv = (creators || []).filter(
     (c) => isAuthor(c) && c.fieldMode !== 1 && c.lastName
   );
+  if (!indiv.length) {
+    indiv = (creators || []).filter((c) => c.fieldMode !== 1 && c.lastName);
+  }
   if (indiv.length > 0) {
     const a = indiv[0];
     return {
@@ -105,9 +111,11 @@ function authorToken(creators) {
     };
   }
 
-  const org = (creators || []).find(
+  // Organisation: prefer "author"; else any single-field (institutional) creator.
+  let org = (creators || []).find(
     (c) => isAuthor(c) && c.fieldMode === 1 && c.lastName
   );
+  if (!org) org = (creators || []).find((c) => c.fieldMode === 1 && c.lastName);
   if (org) {
     const name = String(org.lastName);
     const words = name
