@@ -91,10 +91,10 @@ function normalizeTitle(title) {
     .trim();
 }
 
-function titlesMatch(input, candidate) {
+function titlesMatchExactly(input, candidate) {
   const a = normalizeTitle(input);
   const b = normalizeTitle(candidate);
-  return !!a && !!b && (a === b || a.includes(b) || b.includes(a));
+  return !!a && !!b && a === b;
 }
 
 function pubmedTitleSearchTerms(title) {
@@ -115,6 +115,35 @@ function cleanPubMedExtra(extra) {
     .filter((line) => line.trim() && !/^\s*(Citation Key|PMID|PMCID|Place)\s*:/i.test(line))
     .join("\n")
     .trim();
+}
+
+function parseXmlDocument(xml) {
+  const win = Zotero.getMainWindow && Zotero.getMainWindow();
+  if (win && win.DOMParser) {
+    return new win.DOMParser().parseFromString(xml, "application/xml");
+  }
+  if (typeof DOMParser !== "undefined") {
+    return new DOMParser().parseFromString(xml, "application/xml");
+  }
+  return Components.classes["@mozilla.org/xmlextras/domparser;1"]
+    .createInstance(Components.interfaces.nsIDOMParser)
+    .parseFromString(xml, "application/xml");
+}
+
+function yearMatches(a, b) {
+  const ay = Number(yearOf(a));
+  const by = Number(yearOf(b));
+  return !!ay && !!by && Math.abs(ay - by) <= 1;
+}
+
+function normalizedLastName(name) {
+  return foldAscii(name || "").toLowerCase();
+}
+
+function firstCreatorLastName(item) {
+  const creators = item.getCreators() || [];
+  const first = creators.find((creator) => creator.lastName);
+  return first ? normalizedLastName(first.lastName) : "";
 }
 
 function pmcidOf(item) {
@@ -495,7 +524,7 @@ class CitationKeySculptor {
         const ids = (data && data.esearchresult && data.esearchresult.idlist) || [];
         for (const id of ids) {
           const pm = await this.pubmedRecord(id);
-          if (pm && titlesMatch(clean, pm.title)) return id;
+          if (pm && titlesMatchExactly(clean, pm.title)) return id;
         }
       } catch (e) {
         this.log(`PubMed title lookup error for ${clean}: ${e}`);
@@ -518,7 +547,7 @@ class CitationKeySculptor {
     const resp = await fetch(url);
     if (!resp.ok) return null;
     const xml = await resp.text();
-    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const doc = parseXmlDocument(xml);
     const article = doc.querySelector("PubmedArticle");
     if (!article) return null;
     const ids = {};
@@ -586,7 +615,19 @@ class CitationKeySculptor {
     const pmid = existingPmid || await this.pmidForTitle(title);
     if (!pmid) return { status: "no-match" };
     const pm = await this.pubmedRecord(pmid);
-    if (!pm || !titlesMatch(title, pm.title)) return { status: "no-match" };
+    if (!pm || !titlesMatchExactly(title, pm.title)) return { status: "no-match" };
+    const itemFirstCreator = firstCreatorLastName(item);
+    const pubmedLastNames = pm.authors
+      .map((author) => normalizedLastName(author.lastName || author.name || ""))
+      .filter(Boolean);
+    const authorOK =
+      !!itemFirstCreator &&
+      pubmedLastNames.some((lastName) => lastName === itemFirstCreator);
+    const yearOK = yearMatches(safeGetField(item, "date"), pm.date);
+    if (!authorOK && !yearOK) {
+      this.log(`PubMed correction rejected for ${item.key}: title matched PMID ${pmid}, but author/year corroboration failed`);
+      return { status: "no-match" };
+    }
 
     let changed = false;
     const journalTypeID = Zotero.ItemTypes.getID("journalArticle");
@@ -731,12 +772,6 @@ class CitationKeySculptor {
 
   async attachCometPdfToItem(item, mode = "source") {
     await item.loadAllData();
-    if (mode === "source") {
-      await this.correctMetadataFromPubMed(item).catch((e) => {
-        this.log(`PubMed correction before PDF attach failed for ${item.key}: ${e}`);
-      });
-      await item.loadAllData();
-    }
     if (await this.hasPdfAttachment(item)) {
       return { status: "skipped-has-pdf" };
     }
