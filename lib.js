@@ -241,7 +241,7 @@ class CitationKeySculptor {
     Zotero.debug(`[CitationKeySculptor] ${msg}`);
   }
 
-  notify(text) {
+  notify(text, opts = {}) {
     try {
       const pw = new Zotero.ProgressWindow({ closeOnClick: true });
       pw.changeHeadline("Citation Key Sculptor");
@@ -249,7 +249,23 @@ class CitationKeySculptor {
       pw.show();
       pw.startCloseTimer(4000);
     } catch (e) {
-      this.log(`notify failed: ${e}`);
+      this.log(`progress notification failed: ${e}`);
+    }
+    if (opts.macOS) {
+      this.notifyMacOS(text);
+    }
+  }
+
+  async notifyMacOS(text) {
+    try {
+      await Zotero.Utilities.Internal.subprocess("/usr/bin/osascript", [
+        "-e",
+        "on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run",
+        "Citation Key Sculptor",
+        text,
+      ]);
+    } catch (e) {
+      this.log(`macOS notification failed: ${e}`);
     }
   }
 
@@ -592,7 +608,8 @@ class CitationKeySculptor {
       this.pdfQueueRunning = false;
       this.notify(
         `PDF attach finished — attached: ${attached}, already had PDF: ${skipped}, ` +
-        `not eligible: ${notEligible}, not found: ${notFound}, failed: ${failed}.`
+        `not eligible: ${notEligible}, not found: ${notFound}, failed: ${failed}.`,
+        { macOS: true }
       );
       if (this.pdfQueue.length) {
         this.processPdfQueue();
