@@ -349,6 +349,21 @@ class CitationKeySculptor {
               Zotero.CitationKeySculptor.attachPdfFromCometForSelection();
             },
           },
+          {
+            menuType: "menuitem",
+            onShowing: (_event, context) => {
+              const pane = Zotero.getActiveZoteroPane();
+              const sel = pane ? pane.getSelectedItems() : [];
+              const hasRegular = sel.some(
+                (item) => item.isRegularItem() && !item.isFeedItem
+              );
+              context.setVisible(!!hasRegular);
+              context.menuElem.setAttribute("label", "Attach Archival PDF from Web Page");
+            },
+            onCommand: (_event, _context) => {
+              Zotero.CitationKeySculptor.attachArchivalPdfForSelection();
+            },
+          },
         ],
       });
       this.menuRegistered = true;
@@ -425,7 +440,7 @@ class CitationKeySculptor {
     );
   }
 
-  async runSmartCapture(item, ck) {
+  async runSmartCapture(item, ck, mode = "source") {
     const helper = PathUtils.join(
       FileUtils.getDir("Home", []).path,
       ".claude",
@@ -434,12 +449,14 @@ class CitationKeySculptor {
       "zotero-smart-capture"
     );
     const args = [
-      "resolve-pdf",
+      mode === "archival" ? "resolve-archival-pdf" : "resolve-pdf",
       "--doi", safeGetField(item, "DOI").trim(),
       "--pmid", pmidOf(item),
       "--pmcid", pmcidOf(item),
       "--citation-key", ck,
       "--title", safeGetField(item, "title"),
+      "--year", yearOf(safeGetField(item, "date") || item.getField("date", false, true) || ""),
+      "--url", safeGetField(item, "url"),
       "--no-notify",
     ];
     let stdout = "";
@@ -478,12 +495,15 @@ class CitationKeySculptor {
     return { path: destPath, filename };
   }
 
-  async attachCometPdfToItem(item) {
+  async attachCometPdfToItem(item, mode = "source") {
     await item.loadAllData();
     if (await this.hasPdfAttachment(item)) {
       return { status: "skipped-has-pdf" };
     }
-    if (!normalizeDoi(safeGetField(item, "DOI"))) {
+    if (mode === "archival" && !safeGetField(item, "url").trim() && !normalizeDoi(safeGetField(item, "DOI"))) {
+      return { status: "skipped-not-eligible" };
+    }
+    if (mode !== "archival" && !normalizeDoi(safeGetField(item, "DOI")) && !pmidOf(item) && !pmcidOf(item) && !safeGetField(item, "url").trim() && !safeGetField(item, "title").trim()) {
       return { status: "skipped-not-eligible" };
     }
 
@@ -491,7 +511,7 @@ class CitationKeySculptor {
     const ck = safeGetField(item, "citationKey") || citationKeyFor(item);
     if (!ck) throw new Error("Could not derive citation key before attaching PDF.");
 
-    const smart = await this.runSmartCapture(item, ck);
+    const smart = await this.runSmartCapture(item, ck, mode);
     if (!smart || !smart.ok || !smart.path) {
       this.log(`No PDF found for item ${item.key}: ${JSON.stringify(smart)}`);
       return { status: "no-pdf-found" };
@@ -502,7 +522,7 @@ class CitationKeySculptor {
       attachment = await Zotero.Attachments.linkFromFileWithRelativePath({
         path: linked.filename,
         parentItemID: item.id,
-        title: "Full Text PDF",
+        title: mode === "archival" ? "Archival PDF (Generated from Web Page)" : "Full Text PDF",
         contentType: "application/pdf",
       });
     } catch (e) {
@@ -513,6 +533,7 @@ class CitationKeySculptor {
     return {
       status: "attached",
       url: smart.url || "",
+      captureMode: smart.captureMode || (mode === "archival" ? "markdown-derived" : ""),
       keyStatus,
       attachmentKey: attachment ? attachment.key : "",
       size: smart.size || 0,
@@ -526,13 +547,13 @@ class CitationKeySculptor {
     return await this.attachCometPdfToItem(item);
   }
 
-  enqueuePdfItems(items) {
+  enqueuePdfItems(items, mode = "source") {
     let queued = 0;
     for (const item of items) {
-      const queueKey = `${item.libraryID}:${item.id}`;
+      const queueKey = `${mode}:${item.libraryID}:${item.id}`;
       if (this.pdfQueueSeen.has(queueKey)) continue;
       this.pdfQueueSeen.add(queueKey);
-      this.pdfQueue.push({ id: item.id, libraryID: item.libraryID, key: item.key, queueKey });
+      this.pdfQueue.push({ id: item.id, libraryID: item.libraryID, key: item.key, queueKey, mode });
       queued++;
     }
     if (!this.pdfQueueRunning) {
@@ -554,7 +575,7 @@ class CitationKeySculptor {
             notEligible++;
             continue;
           }
-          const result = await this.attachCometPdfToItem(item);
+          const result = await this.attachCometPdfToItem(item, entry.mode || "source");
           if (result.status === "attached") attached++;
           else if (result.status === "skipped-has-pdf") skipped++;
           else if (result.status === "skipped-not-eligible") notEligible++;
@@ -570,7 +591,7 @@ class CitationKeySculptor {
     } finally {
       this.pdfQueueRunning = false;
       this.notify(
-        `Comet / OSU PDF attach finished — attached: ${attached}, already had PDF: ${skipped}, ` +
+        `PDF attach finished — attached: ${attached}, already had PDF: ${skipped}, ` +
         `not eligible: ${notEligible}, not found: ${notFound}, failed: ${failed}.`
       );
       if (this.pdfQueue.length) {
@@ -684,7 +705,7 @@ class CitationKeySculptor {
     );
   }
 
-  async attachPdfFromCometForSelection() {
+  async queuePdfSelection(mode, queuedMessage, duplicateMessage) {
     const pane = Zotero.getActiveZoteroPane();
     if (!pane) return;
     const items = pane
@@ -695,11 +716,27 @@ class CitationKeySculptor {
       return;
     }
 
-    const queued = this.enqueuePdfItems(items);
+    const queued = this.enqueuePdfItems(items, mode);
     this.notify(
       queued
-        ? `Queued ${queued} item${queued === 1 ? "" : "s"} for Comet / OSU PDF attach. You can keep using Zotero.`
-        : "Selected items are already queued for Comet / OSU PDF attach."
+        ? queuedMessage(queued)
+        : duplicateMessage
+    );
+  }
+
+  async attachPdfFromCometForSelection() {
+    await this.queuePdfSelection(
+      "source",
+      (queued) => `Queued ${queued} item${queued === 1 ? "" : "s"} for Comet / OSU PDF attach. You can keep using Zotero.`,
+      "Selected items are already queued for Comet / OSU PDF attach."
+    );
+  }
+
+  async attachArchivalPdfForSelection() {
+    await this.queuePdfSelection(
+      "archival",
+      (queued) => `Queued ${queued} item${queued === 1 ? "" : "s"} for archival web-page PDF attach. You can keep using Zotero.`,
+      "Selected items are already queued for archival web-page PDF attach."
     );
   }
 }
