@@ -146,6 +146,47 @@ function firstCreatorLastName(item) {
   return first ? normalizedLastName(first.lastName) : "";
 }
 
+function directChild(node, tagName) {
+  if (!node || !node.children) return null;
+  return Array.from(node.children).find((child) => child.tagName === tagName) || null;
+}
+
+function titleCaseJournalTitle(value) {
+  const lowerWords = new Set([
+    "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "nor",
+    "of", "on", "or", "per", "the", "to", "v", "via", "vs", "with",
+  ]);
+  const input = String(value || "").trim().replace(/\s+/g, " ");
+  if (!input) return "";
+  return input.split(" ").map((word, index, words) => {
+    const bare = word.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "");
+    const leading = word.slice(0, word.indexOf(bare));
+    const trailing = word.slice(word.indexOf(bare) + bare.length);
+    if (!bare) return word;
+    if (/[A-Z]{2,}|\d/.test(bare)) return word;
+    const lower = bare.toLowerCase();
+    const forceCap = index === 0 || index === words.length - 1 || /[:.;!?]$/.test(words[index - 1] || "");
+    const cased = !forceCap && lowerWords.has(lower)
+      ? lower
+      : lower.charAt(0).toUpperCase() + lower.slice(1);
+    return leading + cased + trailing;
+  }).join(" ");
+}
+
+async function fetchWithRetry(url, opts = {}) {
+  const attempts = opts.attempts || 5;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const resp = await fetch(url);
+    if (resp.status !== 429 && resp.status !== 503) return resp;
+    const retryAfter = Number(resp.headers.get("Retry-After") || "");
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : 750 * (attempt + 1);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  return await fetch(url);
+}
+
 function pmcidOf(item) {
   const native = safeGetField(item, "PMCID").trim();
   if (native) return native.toUpperCase().startsWith("PMC") ? native.toUpperCase() : `PMC${native}`;
@@ -484,7 +525,7 @@ class CitationKeySculptor {
       `${PUBMED_ESEARCH}?db=pubmed&retmode=json&retmax=2&term=` +
       encodeURIComponent(`${clean}[DOI]`);
     try {
-      const resp = await fetch(url);
+      const resp = await fetchWithRetry(url);
       if (!resp.ok) {
         this.log(`PubMed DOI lookup failed (${resp.status}) for ${clean}`);
         this.doiPmidCache.set(key, "");
@@ -518,7 +559,7 @@ class CitationKeySculptor {
         `${PUBMED_ESEARCH}?db=pubmed&retmode=json&retmax=10&term=` +
         encodeURIComponent(term);
       try {
-        const resp = await fetch(url);
+        const resp = await fetchWithRetry(url);
         if (!resp.ok) continue;
         const data = await resp.json();
         const ids = (data && data.esearchresult && data.esearchresult.idlist) || [];
@@ -544,14 +585,19 @@ class CitationKeySculptor {
     const url =
       `${PUBMED_EFETCH}?db=pubmed&id=${encodeURIComponent(clean)}` +
       "&rettype=xml&retmode=xml";
-    const resp = await fetch(url);
-    if (!resp.ok) return null;
+    const resp = await fetchWithRetry(url);
+    if (!resp.ok) {
+      throw new Error(`PubMed efetch failed for ${clean}: HTTP ${resp.status}`);
+    }
     const xml = await resp.text();
     const doc = parseXmlDocument(xml);
     const article = doc.querySelector("PubmedArticle");
     if (!article) return null;
     const ids = {};
-    for (const node of article.querySelectorAll("PubmedData ArticleIdList ArticleId")) {
+    const pubmedData = directChild(article, "PubmedData");
+    const articleIdList = directChild(pubmedData, "ArticleIdList");
+    for (const node of articleIdList ? Array.from(articleIdList.children) : []) {
+      if (node.tagName !== "ArticleId") continue;
       const type = (node.getAttribute("IdType") || "").toLowerCase();
       ids[type] = (node.textContent || "").trim();
     }
@@ -653,7 +699,7 @@ class CitationKeySculptor {
     }
 
     changed = this.setFieldIfValid(item, "title", pm.title) || changed;
-    changed = this.setFieldIfValid(item, "publicationTitle", pm.journal) || changed;
+    changed = this.setFieldIfValid(item, "publicationTitle", titleCaseJournalTitle(pm.journal)) || changed;
     changed = this.setFieldIfValid(item, "journalAbbreviation", pm.journalAbbrev) || changed;
     changed = this.setFieldIfValid(item, "ISSN", pm.issn) || changed;
     changed = this.setFieldIfValid(item, "volume", pm.volume) || changed;
