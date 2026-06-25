@@ -81,6 +81,63 @@ function normalizeDoi(doi) {
     .toLowerCase();
 }
 
+function cleanExtractedDoi(value) {
+  const doi = normalizeDoi(value)
+    .replace(/[)\].,;]+$/g, "")
+    .replace(/%2f/gi, "/");
+  return /^10\.\d{4,9}\/\S+$/i.test(doi) ? doi : "";
+}
+
+function doiFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    const doiParam = u.searchParams.get("doi");
+    if (doiParam) {
+      const decoded = decodeURIComponent(doiParam);
+      const doi = cleanExtractedDoi(decoded);
+      if (doi) return doi;
+    }
+    const decodedPath = decodeURIComponent(u.pathname || "");
+    const pathMatch = decodedPath.match(/(?:\/doi\/(?:full|abs|epdf|pdf)?\/?|\/)(10\.\d{4,9}\/[^?#]+)/i);
+    if (pathMatch) {
+      const doi = cleanExtractedDoi(pathMatch[1]);
+      if (doi) return doi;
+    }
+  } catch (e) {}
+  const m = decodeURIComponent(raw).match(/10\.\d{4,9}\/[^\s"'<>]+/i);
+  return m ? cleanExtractedDoi(m[0]) : "";
+}
+
+function pmidFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (!/pubmed|ncbi\.nlm\.nih\.gov/i.test(u.hostname)) return "";
+    const m = `${u.pathname}/`.match(/\/(\d{6,9})(?:[/?#.]|$)/);
+    return m ? m[1] : "";
+  } catch (e) {
+    const m = raw.match(/pubmed[^0-9]*(\d{6,9})(?:[/?#.]|$)/i);
+    return m ? m[1] : "";
+  }
+}
+
+function isCapturedResolverUrl(value) {
+  return /click\.endnote\.com|clinicalkey|pubmed[-.a-z0-9]*proxy\.lib\.ohio-state\.edu/i.test(value || "");
+}
+
+function isPubMedCorrectionCandidate(item) {
+  const url = safeGetField(item, "url").trim();
+  return !!pmidOf(item) ||
+    !!pmcidOf(item) ||
+    !!normalizeDoi(safeGetField(item, "DOI")) ||
+    !!doiFromUrl(url) ||
+    !!pmidFromUrl(url) ||
+    isCapturedResolverUrl(url);
+}
+
 function normalizeTitle(title) {
   return (title || "")
     .toLowerCase()
@@ -95,6 +152,21 @@ function titlesMatchExactly(input, candidate) {
   const a = normalizeTitle(input);
   const b = normalizeTitle(candidate);
   return !!a && !!b && a === b;
+}
+
+function titleWithoutCaptureSuffix(title) {
+  return (title || "")
+    .replace(/\s*\|\s*EndNote\s+Click\s*$/i, "")
+    .replace(/\s*-\s*ClinicalKey\s*$/i, "")
+    .replace(/\s*-\s*SciSpace\s+Literature\s+Review\s*$/i, "")
+    .replace(/\s*\|\s*Psychology\s+Today\s*$/i, "")
+    .replace(/\s*\|\s*[^|]{2,80}\s*$/i, "")
+    .trim();
+}
+
+function titlesMatchAfterCaptureCleanup(input, candidate) {
+  return titlesMatchExactly(input, candidate) ||
+    titlesMatchExactly(titleWithoutCaptureSuffix(input), candidate);
 }
 
 function pubmedTitleSearchTerms(title) {
@@ -342,6 +414,9 @@ class CitationKeySculptor {
     this.pdfQueue = [];
     this.pdfQueueRunning = false;
     this.pdfQueueSeen = new Set();
+    this.optimizeQueue = [];
+    this.optimizeQueueRunning = false;
+    this.optimizeQueueSeen = new Set();
   }
 
   log(msg) {
@@ -500,6 +575,21 @@ class CitationKeySculptor {
                 (item) => item.isRegularItem() && !item.isFeedItem
               );
               context.setVisible(!!hasRegular);
+              context.menuElem.setAttribute("label", "Optimize Metadata and Attachments");
+            },
+            onCommand: (_event, _context) => {
+              Zotero.CitationKeySculptor.optimizeMetadataAndAttachmentsForSelection();
+            },
+          },
+          {
+            menuType: "menuitem",
+            onShowing: (_event, context) => {
+              const pane = Zotero.getActiveZoteroPane();
+              const sel = pane ? pane.getSelectedItems() : [];
+              const hasRegular = sel.some(
+                (item) => item.isRegularItem() && !item.isFeedItem
+              );
+              context.setVisible(!!hasRegular);
               context.menuElem.setAttribute("label", "Attach PDF from Comet / OSU EasyProxy");
             },
             onCommand: (_event, _context) => {
@@ -575,7 +665,7 @@ class CitationKeySculptor {
     ];
     for (const term of queries) {
       const url =
-        `${PUBMED_ESEARCH}?db=pubmed&retmode=json&retmax=10&term=` +
+        `${PUBMED_ESEARCH}?db=pubmed&retmode=json&retmax=100&term=` +
         encodeURIComponent(term);
       try {
         const resp = await fetchWithRetry(url);
@@ -584,13 +674,48 @@ class CitationKeySculptor {
         const ids = (data && data.esearchresult && data.esearchresult.idlist) || [];
         for (const id of ids) {
           const pm = await this.pubmedRecord(id);
-          if (pm && titlesMatchExactly(clean, pm.title)) return id;
+          if (pm && titlesMatchAfterCaptureCleanup(clean, pm.title)) return id;
         }
       } catch (e) {
         this.log(`PubMed title lookup error for ${clean}: ${e}`);
       }
     }
     return "";
+  }
+
+  async pmidForItem(item) {
+    const existing = pmidOf(item);
+    if (existing) return { pmid: existing, authority: "native-pmid" };
+
+    const url = safeGetField(item, "url").trim();
+    const childUrls = [];
+    try {
+      const attIds = item.getAttachments() || [];
+      if (attIds.length) {
+        const atts = await Zotero.Items.getAsync(attIds);
+        for (const att of atts) {
+          const u = safeGetField(att, "url").trim();
+          if (u) childUrls.push(u);
+        }
+      }
+    } catch (e) {}
+
+    for (const candidateUrl of [url, ...childUrls]) {
+      const pmid = pmidFromUrl(candidateUrl);
+      if (pmid) return { pmid, authority: "url-pmid" };
+    }
+
+    const nativeDoi = normalizeDoi(safeGetField(item, "DOI"));
+    const extractedDoi = nativeDoi || [url, ...childUrls].map(doiFromUrl).find(Boolean) || "";
+    if (extractedDoi) {
+      const pmid = await this.pmidForDoi(extractedDoi);
+      if (pmid) return { pmid, authority: nativeDoi ? "native-doi" : "url-doi", doi: extractedDoi };
+    }
+
+    const title = titleWithoutCaptureSuffix(safeGetField(item, "title")).trim();
+    const pmid = await this.pmidForTitle(title);
+    if (pmid) return { pmid, authority: "title" };
+    return { pmid: "", authority: "" };
   }
 
   textOf(node, selector) {
@@ -675,12 +800,15 @@ class CitationKeySculptor {
       return { status: "skipped" };
     }
     await item.loadAllData();
+    if (!isPubMedCorrectionCandidate(item)) {
+      return { status: "skipped-not-article-like" };
+    }
     const title = safeGetField(item, "title").trim();
-    const existingPmid = pmidOf(item);
-    const pmid = existingPmid || await this.pmidForTitle(title);
+    const match = await this.pmidForItem(item);
+    const pmid = match.pmid;
     if (!pmid) return { status: "no-match" };
     const pm = await this.pubmedRecord(pmid);
-    if (!pm || !titlesMatchExactly(title, pm.title)) return { status: "no-match" };
+    if (!pm || !titlesMatchAfterCaptureCleanup(title, pm.title)) return { status: "no-match" };
     const itemFirstCreator = firstCreatorLastName(item);
     const pubmedLastNames = pm.authors
       .map((author) => normalizedLastName(author.lastName || author.name || ""))
@@ -689,7 +817,8 @@ class CitationKeySculptor {
       !!itemFirstCreator &&
       pubmedLastNames.some((lastName) => lastName === itemFirstCreator);
     const yearOK = yearMatches(safeGetField(item, "date"), pm.date);
-    if (!authorOK && !yearOK) {
+    const identifierAuthority = /^(native|url)-(pmid|doi)$/.test(match.authority || "");
+    if (!identifierAuthority && !authorOK && !yearOK) {
       this.log(`PubMed correction rejected for ${item.key}: title matched PMID ${pmid}, but author/year corroboration failed`);
       return { status: "no-match" };
     }
@@ -728,6 +857,9 @@ class CitationKeySculptor {
     changed = this.setFieldIfValid(item, "DOI", pm.doi) || changed;
     changed = this.setFieldIfValid(item, "PMID", pm.pmid) || changed;
     changed = this.setFieldIfValid(item, "PMCID", pm.pmcid) || changed;
+    if (isCapturedResolverUrl(safeGetField(item, "url"))) {
+      changed = this.setFieldIfValid(item, "url", `https://pubmed.ncbi.nlm.nih.gov/${pm.pmid}/`) || changed;
+    }
     if (pm.abstract && !safeGetField(item, "abstractNote").trim()) {
       changed = this.setFieldIfValid(item, "abstractNote", pm.abstract) || changed;
     }
@@ -885,6 +1017,119 @@ class CitationKeySculptor {
     const item = await Zotero.Items.getByLibraryAndKeyAsync(Zotero.Libraries.userLibraryID, itemKey);
     if (!item) throw new Error(`Item not found: ${itemKey}`);
     return await this.attachCometPdfToItem(item);
+  }
+
+  isSourcePdfCandidate(item) {
+    const typeName = Zotero.ItemTypes.getName(item.itemTypeID);
+    return typeName === "journalArticle" ||
+      !!normalizeDoi(safeGetField(item, "DOI")) ||
+      !!pmidOf(item) ||
+      !!pmcidOf(item);
+  }
+
+  async optimizeBasicItemType(item) {
+    const url = safeGetField(item, "url").trim();
+    if (!url) return false;
+    const hasHardIdentifier = !!normalizeDoi(safeGetField(item, "DOI")) || !!pmidOf(item) || !!pmcidOf(item);
+    if (hasHardIdentifier) return false;
+
+    let target = "";
+    if (/nature\.com\/articles\/[^/]+\/figures\//i.test(url)) {
+      target = "webpage";
+    } else if (/wsj\.com|washingtonpost\.com|sfchronicle\.com|economictimes\.indiatimes\.com|kathmandupost\.com/i.test(url)) {
+      target = "newspaperArticle";
+    }
+    if (!target) return false;
+    const targetID = Zotero.ItemTypes.getID(target);
+    if (targetID && item.itemTypeID !== targetID) {
+      item.setType(targetID);
+      await item.saveTx();
+      return true;
+    }
+    return false;
+  }
+
+  async optimizeMetadataAndAttachment(item) {
+    if (!item || !item.isRegularItem || !item.isRegularItem() || item.isFeedItem) {
+      return { status: "skipped" };
+    }
+    await item.loadAllData();
+    const beforeHadPdf = await this.hasPdfAttachment(item);
+    let corrected = { status: "skipped-not-article-like" };
+    if (isPubMedCorrectionCandidate(item)) {
+      try {
+        corrected = await this.correctMetadataFromPubMed(item);
+      } catch (e) {
+        this.log(`Metadata optimization failed for ${item.key}: ${e}`);
+        corrected = { status: "failed", error: String(e) };
+      }
+    }
+    await item.loadAllData();
+    await this.optimizeBasicItemType(item);
+    await item.loadAllData();
+    const keyStatus = await this.applyKey(item);
+    if (beforeHadPdf || await this.hasPdfAttachment(item)) {
+      return { status: "metadata-only", corrected: corrected.status, keyStatus };
+    }
+
+    const url = safeGetField(item, "url").trim();
+    const mode = this.isSourcePdfCandidate(item) ? "source" : (url ? "archival" : "");
+    if (!mode) {
+      return { status: "no-attachment-source", corrected: corrected.status, keyStatus };
+    }
+    const attached = await this.attachCometPdfToItem(item, mode);
+    return { status: attached.status, mode, corrected: corrected.status, keyStatus };
+  }
+
+  enqueueOptimizeItems(items) {
+    let queued = 0;
+    for (const item of items) {
+      if (!item || !item.isRegularItem || !item.isRegularItem() || item.isFeedItem) continue;
+      const queueKey = `optimize:${item.libraryID}:${item.id}`;
+      if (this.optimizeQueueSeen.has(queueKey)) continue;
+      this.optimizeQueueSeen.add(queueKey);
+      this.optimizeQueue.push({ id: item.id, libraryID: item.libraryID, key: item.key, queueKey });
+      queued++;
+    }
+    if (!this.optimizeQueueRunning) {
+      this.processOptimizeQueue();
+    }
+    return queued;
+  }
+
+  async processOptimizeQueue() {
+    if (this.optimizeQueueRunning) return;
+    this.optimizeQueueRunning = true;
+    let attached = 0, metadataOnly = 0, skipped = 0, notFound = 0, failed = 0;
+    try {
+      while (this.optimizeQueue.length) {
+        const entry = this.optimizeQueue.shift();
+        try {
+          const item = await Zotero.Items.getAsync(entry.id);
+          const result = await this.optimizeMetadataAndAttachment(item);
+          if (result.status === "attached") attached++;
+          else if (result.status === "metadata-only" || result.status === "skipped-has-pdf") metadataOnly++;
+          else if (result.status === "no-pdf-found") notFound++;
+          else if (result.status === "skipped" || result.status === "skipped-not-eligible" || result.status === "no-attachment-source") skipped++;
+          else failed++;
+        } catch (e) {
+          failed++;
+          this.log(`Optimize queue error on item ${entry.key || entry.id}: ${e}`);
+        } finally {
+          this.optimizeQueueSeen.delete(entry.queueKey);
+        }
+      }
+    } finally {
+      this.optimizeQueueRunning = false;
+      this.notify(
+        `Record optimization finished — attached: ${attached}, metadata only: ${metadataOnly}, ` +
+        `not found: ${notFound}, skipped: ${skipped}, failed: ${failed}.`,
+        { macOS: true }
+      );
+      if (this.optimizeQueue.length) {
+        this.processOptimizeQueue();
+      }
+    }
   }
 
   enqueuePdfItems(items, mode = "source") {
@@ -1071,6 +1316,24 @@ class CitationKeySculptor {
     this.notify(
       `PubMed correction — corrected: ${corrected}, unchanged: ${unchanged}, ` +
       `no match: ${noMatch}, failed: ${failed}.`
+    );
+  }
+
+  async optimizeMetadataAndAttachmentsForSelection() {
+    const pane = Zotero.getActiveZoteroPane();
+    if (!pane) return;
+    const items = pane
+      .getSelectedItems()
+      .filter((item) => item.isRegularItem() && !item.isFeedItem);
+    if (!items.length) {
+      this.notify("No regular items selected.");
+      return;
+    }
+    const queued = this.enqueueOptimizeItems(items);
+    this.notify(
+      queued
+        ? `Queued ${queued} item${queued === 1 ? "" : "s"} for metadata and attachment optimization. You can keep using Zotero.`
+        : "Selected items are already queued for metadata and attachment optimization."
     );
   }
 
