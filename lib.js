@@ -590,6 +590,21 @@ class CitationKeySculptor {
                 (item) => item.isRegularItem() && !item.isFeedItem
               );
               context.setVisible(!!hasRegular);
+              context.menuElem.setAttribute("label", "Repair Dead PDF Links");
+            },
+            onCommand: (_event, _context) => {
+              Zotero.CitationKeySculptor.repairDeadPdfLinksForSelection();
+            },
+          },
+          {
+            menuType: "menuitem",
+            onShowing: (_event, context) => {
+              const pane = Zotero.getActiveZoteroPane();
+              const sel = pane ? pane.getSelectedItems() : [];
+              const hasRegular = sel.some(
+                (item) => item.isRegularItem() && !item.isFeedItem
+              );
+              context.setVisible(!!hasRegular);
               context.menuElem.setAttribute("label", "Attach PDF from Comet / OSU EasyProxy");
             },
             onCommand: (_event, _context) => {
@@ -901,15 +916,40 @@ class CitationKeySculptor {
     return true;
   }
 
-  async hasPdfAttachment(item) {
+  async pdfAttachmentStatus(item) {
     const attIds = item.getAttachments() || [];
-    if (!attIds.length) return false;
+    if (!attIds.length) return { live: [], dead: [] };
     const atts = await Zotero.Items.getAsync(attIds);
-    return atts.some((a) =>
-      a.isFileAttachment &&
-      a.isFileAttachment() &&
-      a.attachmentContentType === "application/pdf"
-    );
+    const live = [];
+    const dead = [];
+    for (const a of atts) {
+      if (!a || !a.isFileAttachment || !a.isFileAttachment() || a.attachmentContentType !== "application/pdf") {
+        continue;
+      }
+      let filePath = "";
+      let exists = false;
+      try {
+        filePath = a.getFilePath ? a.getFilePath() : "";
+        exists = !!filePath && await IOUtils.exists(filePath);
+      } catch (e) {
+        exists = false;
+      }
+      if (exists) live.push(a);
+      else dead.push(a);
+    }
+    return { live, dead };
+  }
+
+  async hasPdfAttachment(item) {
+    const status = await this.pdfAttachmentStatus(item);
+    return status.live.length > 0;
+  }
+
+  async trashDeadPdfAttachments(item) {
+    const status = await this.pdfAttachmentStatus(item);
+    if (!status.dead.length) return 0;
+    await Zotero.Items.trashTx(status.dead.map((a) => a.id));
+    return status.dead.length;
   }
 
   async runSmartCapture(item, ck, mode = "source") {
@@ -969,7 +1009,8 @@ class CitationKeySculptor {
 
   async attachCometPdfToItem(item, mode = "source") {
     await item.loadAllData();
-    if (await this.hasPdfAttachment(item)) {
+    const pdfStatus = await this.pdfAttachmentStatus(item);
+    if (pdfStatus.live.length) {
       return { status: "skipped-has-pdf" };
     }
     if (mode === "archival" && !safeGetField(item, "url").trim() && !normalizeDoi(safeGetField(item, "DOI"))) {
@@ -1002,11 +1043,13 @@ class CitationKeySculptor {
       throw e;
     }
     await this.renameAttachments(item, ck);
+    const deadLinksRepaired = await this.trashDeadPdfAttachments(item);
     return {
       status: "attached",
       url: smart.url || "",
       captureMode: smart.captureMode || (mode === "archival" ? "markdown-derived" : ""),
       keyStatus,
+      deadLinksRepaired,
       attachmentKey: attachment ? attachment.key : "",
       size: smart.size || 0,
     };
@@ -1055,6 +1098,7 @@ class CitationKeySculptor {
     }
     await item.loadAllData();
     const beforeHadPdf = await this.hasPdfAttachment(item);
+    const beforeDeadPdfLinks = (await this.pdfAttachmentStatus(item)).dead.length;
     let corrected = { status: "skipped-not-article-like" };
     if (isPubMedCorrectionCandidate(item)) {
       try {
@@ -1069,7 +1113,7 @@ class CitationKeySculptor {
     await item.loadAllData();
     const keyStatus = await this.applyKey(item);
     if (beforeHadPdf || await this.hasPdfAttachment(item)) {
-      return { status: "metadata-only", corrected: corrected.status, keyStatus };
+      return { status: "metadata-only", corrected: corrected.status, keyStatus, deadLinks: beforeDeadPdfLinks };
     }
 
     const url = safeGetField(item, "url").trim();
@@ -1078,7 +1122,7 @@ class CitationKeySculptor {
       return { status: "no-attachment-source", corrected: corrected.status, keyStatus };
     }
     const attached = await this.attachCometPdfToItem(item, mode);
-    return { status: attached.status, mode, corrected: corrected.status, keyStatus };
+    return { status: attached.status, mode, corrected: corrected.status, keyStatus, deadLinks: beforeDeadPdfLinks, deadLinksRepaired: attached.deadLinksRepaired || 0 };
   }
 
   enqueueOptimizeItems(items) {
@@ -1100,7 +1144,7 @@ class CitationKeySculptor {
   async processOptimizeQueue() {
     if (this.optimizeQueueRunning) return;
     this.optimizeQueueRunning = true;
-    let attached = 0, metadataOnly = 0, skipped = 0, notFound = 0, failed = 0;
+    let attached = 0, metadataOnly = 0, skipped = 0, notFound = 0, failed = 0, deadLinksRepaired = 0;
     try {
       while (this.optimizeQueue.length) {
         const entry = this.optimizeQueue.shift();
@@ -1112,6 +1156,7 @@ class CitationKeySculptor {
           else if (result.status === "no-pdf-found") notFound++;
           else if (result.status === "skipped" || result.status === "skipped-not-eligible" || result.status === "no-attachment-source") skipped++;
           else failed++;
+          deadLinksRepaired += result.deadLinksRepaired || 0;
         } catch (e) {
           failed++;
           this.log(`Optimize queue error on item ${entry.key || entry.id}: ${e}`);
@@ -1123,7 +1168,7 @@ class CitationKeySculptor {
       this.optimizeQueueRunning = false;
       this.notify(
         `Record optimization finished — attached: ${attached}, metadata only: ${metadataOnly}, ` +
-        `not found: ${notFound}, skipped: ${skipped}, failed: ${failed}.`,
+        `not found: ${notFound}, skipped: ${skipped}, failed: ${failed}, dead links repaired: ${deadLinksRepaired}.`,
         { macOS: true }
       );
       if (this.optimizeQueue.length) {
@@ -1150,7 +1195,7 @@ class CitationKeySculptor {
   async processPdfQueue() {
     if (this.pdfQueueRunning) return;
     this.pdfQueueRunning = true;
-    let attached = 0, skipped = 0, notEligible = 0, notFound = 0, failed = 0;
+    let attached = 0, skipped = 0, notEligible = 0, notFound = 0, failed = 0, deadLinksRepaired = 0;
     try {
       while (this.pdfQueue.length) {
         const entry = this.pdfQueue.shift();
@@ -1166,6 +1211,7 @@ class CitationKeySculptor {
           else if (result.status === "skipped-not-eligible") notEligible++;
           else if (result.status === "no-pdf-found") notFound++;
           else failed++;
+          deadLinksRepaired += result.deadLinksRepaired || 0;
         } catch (e) {
           failed++;
           this.log(`PDF queue error on item ${entry.key || entry.id}: ${e}`);
@@ -1177,7 +1223,7 @@ class CitationKeySculptor {
       this.pdfQueueRunning = false;
       this.notify(
         `PDF attach finished — attached: ${attached}, already had PDF: ${skipped}, ` +
-        `not eligible: ${notEligible}, not found: ${notFound}, failed: ${failed}.`,
+        `not eligible: ${notEligible}, not found: ${notFound}, failed: ${failed}, dead links repaired: ${deadLinksRepaired}.`,
         { macOS: true }
       );
       if (this.pdfQueue.length) {
@@ -1232,9 +1278,21 @@ class CitationKeySculptor {
     const attIds = item.getAttachments() || [];
     if (!attIds.length) return 0;
     const atts = await Zotero.Items.getAsync(attIds);
-    const pdfs = atts
-      .filter((a) => a.isFileAttachment && a.isFileAttachment() && a.attachmentContentType === "application/pdf")
-      .sort((a, b) => a.id - b.id);
+    const pdfs = [];
+    for (const a of atts) {
+      if (!a || !a.isFileAttachment || !a.isFileAttachment() || a.attachmentContentType !== "application/pdf") {
+        continue;
+      }
+      let exists = false;
+      try {
+        const filePath = a.getFilePath ? a.getFilePath() : "";
+        exists = !!filePath && await IOUtils.exists(filePath);
+      } catch (e) {
+        exists = false;
+      }
+      if (exists) pdfs.push(a);
+    }
+    pdfs.sort((a, b) => a.id - b.id);
     let renamed = 0;
     for (let i = 0; i < pdfs.length; i++) {
       const att = pdfs[i];
@@ -1334,6 +1392,24 @@ class CitationKeySculptor {
       queued
         ? `Queued ${queued} item${queued === 1 ? "" : "s"} for metadata and attachment optimization. You can keep using Zotero.`
         : "Selected items are already queued for metadata and attachment optimization."
+    );
+  }
+
+  async repairDeadPdfLinksForSelection() {
+    const pane = Zotero.getActiveZoteroPane();
+    if (!pane) return;
+    const items = pane
+      .getSelectedItems()
+      .filter((item) => item.isRegularItem() && !item.isFeedItem);
+    if (!items.length) {
+      this.notify("No regular items selected.");
+      return;
+    }
+    const queued = this.enqueuePdfItems(items, "source");
+    this.notify(
+      queued
+        ? `Queued ${queued} item${queued === 1 ? "" : "s"} for dead PDF link repair. You can keep using Zotero.`
+        : "Selected items are already queued for PDF repair."
     );
   }
 
