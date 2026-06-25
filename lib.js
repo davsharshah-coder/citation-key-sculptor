@@ -365,15 +365,34 @@ class CitationKeySculptor {
 
   async notifyMacOS(text) {
     try {
+      const win = Zotero.getMainWindow && Zotero.getMainWindow();
+      const NotificationCtor = win && win.Notification;
+      if (NotificationCtor && NotificationCtor.permission === "granted") {
+        const notification = new NotificationCtor("Citation Key Sculptor", {
+          body: text,
+          requireInteraction: false,
+          silent: false,
+        });
+        if (notification && typeof notification.close === "function") {
+          win.setTimeout(() => notification.close(), 8000);
+        }
+        return true;
+      }
+    } catch (e) {
+      this.log(`native notification failed: ${e}`);
+    }
+    try {
       await Zotero.Utilities.Internal.subprocess("/usr/bin/osascript", [
         "-e",
         "on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run",
         "Citation Key Sculptor",
         text,
       ]);
+      return true;
     } catch (e) {
       this.log(`macOS notification failed: ${e}`);
     }
+    return false;
   }
 
   // Warn if Better BibTeX is present and configured to fight us over the field.

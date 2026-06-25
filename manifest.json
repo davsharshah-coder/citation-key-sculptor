@@ -1,12 +1,12 @@
 {
   "manifest_version": 2,
   "name": "Citation Key Sculptor",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Writes CitationSculptor-style citation keys to the native citationKey field, renames linked child PDFs deterministically, corrects confident PubMed metadata matches, grounds DOI-only PubMed items to native PMID before DOI fallback, and can queue selected records for source-PDF or archival web-page PDF attachment through the shared zotero-smart-capture helper. Independent of Better BibTeX.",
   "applications": {
     "zotero": {
       "id": "citation-key-sculptor@tusharshah.local",
-      "update_url": "https://raw.githubusercontent.com/davsharshah-coder/citation-key-sculptor/main/updates.json",
+      "update_url": "https://github.com/davsharshah-coder/citation-key-sculptor/releases/latest/download/updates.json",
       "strict_min_version": "8.0.1",
       "strict_max_version": "10.*"
     }

@@ -3,9 +3,9 @@
     "citation-key-sculptor@tusharshah.local": {
       "updates": [
         {
-          "version": "1.4.3",
-          "update_link": "https://github.com/davsharshah-coder/citation-key-sculptor/releases/download/v1.4.3/citation-key-sculptor-v1.4.3.xpi",
-          "update_hash": "sha256:6b7e7089f580127faa8c54aae60dfc15ca1a7a86d9dfe2648c4ab4604c5ac4c5",
+          "version": "1.4.4",
+          "update_link": "https://github.com/davsharshah-coder/citation-key-sculptor/releases/download/v1.4.4/citation-key-sculptor-v1.4.4.xpi",
+          "update_hash": "sha256:dea21dc5603410d44d788a64a0a9528a4871b1504871db3d7f62d4aa42060624",
           "applications": {
             "zotero": {
               "strict_min_version": "8.0.1",
