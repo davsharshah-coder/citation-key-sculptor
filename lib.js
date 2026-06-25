@@ -21,6 +21,7 @@ const PREF_AUTO = "extensions.citation-key-sculptor.auto"; // bool gate for noti
 const PREF_RENAME = "extensions.citation-key-sculptor.renamePdfs"; // rename child PDFs to <citationKey>.pdf / <citationKey>-N.pdf
 const OBSERVER_ID = "citation-key-sculptor";
 const PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi";
+const PUBMED_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi";
 
 // ----------------------------------------------------------------------------
 // citationKeyFor algorithm — ported faithfully from zotero-curate/index.ts.
@@ -78,6 +79,42 @@ function normalizeDoi(doi) {
     .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
     .replace(/^doi:\s*/i, "")
     .toLowerCase();
+}
+
+function normalizeTitle(title) {
+  return (title || "")
+    .toLowerCase()
+    .replace(/&[a-z]+;/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(the|a|an|and|or|of|for|to|in|on|with|by|from|among)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titlesMatch(input, candidate) {
+  const a = normalizeTitle(input);
+  const b = normalizeTitle(candidate);
+  return !!a && !!b && (a === b || a.includes(b) || b.includes(a));
+}
+
+function pubmedTitleSearchTerms(title) {
+  const tokens = normalizeTitle(title)
+    .split(" ")
+    .filter((w) => w.length > 2 || /^\d{4}$/.test(w));
+  const selected = tokens
+    .filter((w) => !/^(united|states)$/.test(w) || tokens.length < 8)
+    .slice(0, 10);
+  return selected.length
+    ? selected.map((w) => `${w}[Title]`).join(" AND ")
+    : `"${title}"[Title]`;
+}
+
+function cleanPubMedExtra(extra) {
+  return (extra || "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !/^\s*(Citation Key|PMID|PMCID|Place)\s*:/i.test(line))
+    .join("\n")
+    .trim();
 }
 
 function pmcidOf(item) {
@@ -359,6 +396,21 @@ class CitationKeySculptor {
                 (item) => item.isRegularItem() && !item.isFeedItem
               );
               context.setVisible(!!hasRegular);
+              context.menuElem.setAttribute("label", "Correct Metadata from PubMed");
+            },
+            onCommand: (_event, _context) => {
+              Zotero.CitationKeySculptor.correctMetadataFromPubMedForSelection();
+            },
+          },
+          {
+            menuType: "menuitem",
+            onShowing: (_event, context) => {
+              const pane = Zotero.getActiveZoteroPane();
+              const sel = pane ? pane.getSelectedItems() : [];
+              const hasRegular = sel.some(
+                (item) => item.isRegularItem() && !item.isFeedItem
+              );
+              context.setVisible(!!hasRegular);
               context.menuElem.setAttribute("label", "Attach PDF from Comet / OSU EasyProxy");
             },
             onCommand: (_event, _context) => {
@@ -423,6 +475,172 @@ class CitationKeySculptor {
     }
     this.doiPmidCache.set(key, "");
     return "";
+  }
+
+  async pmidForTitle(title) {
+    const clean = (title || "").trim();
+    if (!clean) return "";
+    const queries = [
+      `"${clean}"[Title]`,
+      pubmedTitleSearchTerms(clean),
+    ];
+    for (const term of queries) {
+      const url =
+        `${PUBMED_ESEARCH}?db=pubmed&retmode=json&retmax=10&term=` +
+        encodeURIComponent(term);
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) continue;
+        const data = await resp.json();
+        const ids = (data && data.esearchresult && data.esearchresult.idlist) || [];
+        for (const id of ids) {
+          const pm = await this.pubmedRecord(id);
+          if (pm && titlesMatch(clean, pm.title)) return id;
+        }
+      } catch (e) {
+        this.log(`PubMed title lookup error for ${clean}: ${e}`);
+      }
+    }
+    return "";
+  }
+
+  textOf(node, selector) {
+    const match = node && node.querySelector(selector);
+    return match && match.textContent ? match.textContent.trim() : "";
+  }
+
+  async pubmedRecord(pmid) {
+    const clean = (pmid || "").trim();
+    if (!/^\d+$/.test(clean)) return null;
+    const url =
+      `${PUBMED_EFETCH}?db=pubmed&id=${encodeURIComponent(clean)}` +
+      "&rettype=xml&retmode=xml";
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    const xml = await resp.text();
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const article = doc.querySelector("PubmedArticle");
+    if (!article) return null;
+    const ids = {};
+    for (const node of article.querySelectorAll("PubmedData ArticleIdList ArticleId")) {
+      const type = (node.getAttribute("IdType") || "").toLowerCase();
+      ids[type] = (node.textContent || "").trim();
+    }
+    const dateNode =
+      article.querySelector("Article ArticleDate") ||
+      article.querySelector("JournalIssue PubDate");
+    const year = this.textOf(dateNode, "Year");
+    const month = this.textOf(dateNode, "Month");
+    const day = this.textOf(dateNode, "Day");
+    const date = [year, month, day].filter(Boolean).join(" ");
+    const authors = [];
+    for (const author of article.querySelectorAll("AuthorList Author")) {
+      const collective = this.textOf(author, "CollectiveName");
+      const lastName = this.textOf(author, "LastName");
+      const firstName = this.textOf(author, "ForeName");
+      if (collective) {
+        authors.push({ name: collective });
+      } else if (lastName || firstName) {
+        authors.push({ lastName, firstName });
+      }
+    }
+    const abstract = Array.from(article.querySelectorAll("Abstract AbstractText"))
+      .map((node) => (node.textContent || "").trim())
+      .filter(Boolean)
+      .join("\n\n");
+    return {
+      pmid: clean,
+      pmcid: (ids.pmc || ids.pmcid || "").replace(/^pmc-id:\s*/i, "").replace(/;$/, "").toUpperCase(),
+      doi: normalizeDoi(ids.doi || ""),
+      title: this.textOf(article, "ArticleTitle"),
+      journal: this.textOf(article, "Journal > Title"),
+      journalAbbrev: this.textOf(article, "Journal ISOAbbreviation") || this.textOf(article, "MedlineTA"),
+      issn: this.textOf(article, "Journal ISSN"),
+      volume: this.textOf(article, "JournalIssue Volume"),
+      issue: this.textOf(article, "JournalIssue Issue"),
+      pages: this.textOf(article, "Pagination MedlinePgn"),
+      date,
+      abstract,
+      authors,
+    };
+  }
+
+  setFieldIfValid(item, field, value) {
+    if (!value) return false;
+    const fieldID = Zotero.ItemFields.getID(field);
+    if (!fieldID || !Zotero.ItemFields.isValidForType(fieldID, item.itemTypeID)) {
+      return false;
+    }
+    if ((item.getField(field) || "") === value) return false;
+    item.setField(field, value);
+    return true;
+  }
+
+  async correctMetadataFromPubMed(item) {
+    if (!item || !item.isRegularItem || !item.isRegularItem() || item.isFeedItem) {
+      return { status: "skipped" };
+    }
+    await item.loadAllData();
+    const title = safeGetField(item, "title").trim();
+    const existingPmid = pmidOf(item);
+    const pmid = existingPmid || await this.pmidForTitle(title);
+    if (!pmid) return { status: "no-match" };
+    const pm = await this.pubmedRecord(pmid);
+    if (!pm || !titlesMatch(title, pm.title)) return { status: "no-match" };
+
+    let changed = false;
+    const journalTypeID = Zotero.ItemTypes.getID("journalArticle");
+    if (item.itemTypeID !== journalTypeID) {
+      item.setType(journalTypeID);
+      changed = true;
+    }
+
+    const authorTypeID = Zotero.CreatorTypes.getID("author");
+    const creators = pm.authors.map((author) => {
+      if (author.name) {
+        return { creatorTypeID: authorTypeID, fieldMode: 1, lastName: author.name };
+      }
+      return {
+        creatorTypeID: authorTypeID,
+        firstName: author.firstName || "",
+        lastName: author.lastName || "",
+      };
+    });
+    if (creators.length) {
+      item.setCreators(creators);
+      changed = true;
+    }
+
+    changed = this.setFieldIfValid(item, "title", pm.title) || changed;
+    changed = this.setFieldIfValid(item, "publicationTitle", pm.journal) || changed;
+    changed = this.setFieldIfValid(item, "journalAbbreviation", pm.journalAbbrev) || changed;
+    changed = this.setFieldIfValid(item, "ISSN", pm.issn) || changed;
+    changed = this.setFieldIfValid(item, "volume", pm.volume) || changed;
+    changed = this.setFieldIfValid(item, "issue", pm.issue) || changed;
+    changed = this.setFieldIfValid(item, "pages", pm.pages) || changed;
+    changed = this.setFieldIfValid(item, "date", pm.date) || changed;
+    changed = this.setFieldIfValid(item, "DOI", pm.doi) || changed;
+    changed = this.setFieldIfValid(item, "PMID", pm.pmid) || changed;
+    changed = this.setFieldIfValid(item, "PMCID", pm.pmcid) || changed;
+    if (pm.abstract && !safeGetField(item, "abstractNote").trim()) {
+      changed = this.setFieldIfValid(item, "abstractNote", pm.abstract) || changed;
+    }
+    const cleanedExtra = cleanPubMedExtra(safeGetField(item, "extra"));
+    if (cleanedExtra !== safeGetField(item, "extra").trim()) {
+      item.setField("extra", cleanedExtra);
+      changed = true;
+    }
+    const ck = citationKeyFor(item);
+    if (ck && safeGetField(item, "citationKey") !== ck) {
+      item.setField("citationKey", ck);
+      changed = true;
+    }
+    if (changed) {
+      await item.saveTx();
+      this.log(`Corrected ${item.key} from PubMed PMID ${pmid}`);
+      return { status: "corrected", pmid, citationKey: ck };
+    }
+    return { status: "unchanged", pmid, citationKey: ck };
   }
 
   async groundPmidFromDoi(item) {
@@ -513,6 +731,12 @@ class CitationKeySculptor {
 
   async attachCometPdfToItem(item, mode = "source") {
     await item.loadAllData();
+    if (mode === "source") {
+      await this.correctMetadataFromPubMed(item).catch((e) => {
+        this.log(`PubMed correction before PDF attach failed for ${item.key}: ${e}`);
+      });
+      await item.loadAllData();
+    }
     if (await this.hasPdfAttachment(item)) {
       return { status: "skipped-has-pdf" };
     }
@@ -719,6 +943,34 @@ class CitationKeySculptor {
     this.notify(
       `Citation keys — written: ${written}, unchanged: ${unchanged}, skipped (no key): ${noKey}.` +
       (soft ? ` ${soft} used a soft brief-title fallback (no PMID/DOI/URL) — consider grounding.` : "")
+    );
+  }
+
+  async correctMetadataFromPubMedForSelection() {
+    const pane = Zotero.getActiveZoteroPane();
+    if (!pane) return;
+    const items = pane
+      .getSelectedItems()
+      .filter((item) => item.isRegularItem() && !item.isFeedItem);
+    if (!items.length) {
+      this.notify("No regular items selected.");
+      return;
+    }
+    let corrected = 0, unchanged = 0, noMatch = 0, failed = 0;
+    for (const item of items) {
+      try {
+        const result = await this.correctMetadataFromPubMed(item);
+        if (result.status === "corrected") corrected++;
+        else if (result.status === "unchanged") unchanged++;
+        else if (result.status === "no-match") noMatch++;
+      } catch (e) {
+        failed++;
+        this.log(`PubMed metadata correction error on item ${item.id}: ${e}`);
+      }
+    }
+    this.notify(
+      `PubMed correction — corrected: ${corrected}, unchanged: ${unchanged}, ` +
+      `no match: ${noMatch}, failed: ${failed}.`
     );
   }
 
